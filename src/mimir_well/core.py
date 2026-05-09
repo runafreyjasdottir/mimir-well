@@ -1,0 +1,957 @@
+"""
+Mímir's Well — Core Memory Database
+=======================================
+The main RunaMemory class: persistent, self-healing memory with
+Ebbinghaus decay, FTS5 search, contradiction detection, and
+knowledge promotion.
+
+ᛗ í ᛗ í ᚱ — From the Well, all wisdom flows.
+"""
+
+import json
+import logging
+import os
+import re
+import sqlite3
+import threading
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from mimir_well.schema import (
+    ALL_TABLES, FTS_TABLES, FTS_TRIGGERS, INDEXES, PRAGMAS
+)
+from mimir_well.config import MimirConfig
+from mimir_well.decay import (
+    compute_ebbinghaus_decay, compute_reinforcement_boost,
+    compute_confidence_for_promotion
+)
+from mimir_well.repair import check_integrity, repair_database
+from mimir_well.backup import (
+    backup_database, backup_with_rotation as _backup_with_rotation,
+    restore_from_backup, export_to_json, github_backup
+)
+
+logger = logging.getLogger("mimir_well")
+
+
+class RunaMemory:
+    """Persistent AI memory database with Ebbinghaus decay and self-healing.
+
+    Mímir's Well stores memories, knowledge, entities, and relationships
+    in a SQLite database with WAL mode, FTS5 full-text search, and
+    Ebbinghaus-inspired forgetting curves. Memories that are used get
+    stronger; memories that are forgotten decay.
+
+    Thread-safe: uses per-thread connections with WAL mode.
+
+    Example::
+
+        from mimir_well import RunaMemory
+
+        db = RunaMemory()
+        db.add_memory("I prefer dark themes", category="preference", importance=7)
+        results = db.search_memories("dark theme")
+        db.close()
+    """
+
+    def __init__(self, db_path: Optional[str] = None, config: Optional[MimirConfig] = None):
+        """Initialize the memory database.
+
+        Args:
+            db_path: Path to the SQLite database file. If None, uses
+                ~/.mimir_well/mimir_well.db
+            config: Optional MimirConfig instance. If None, loads from
+                ~/.mimir_well/mimir-well-config.json
+        """
+        self._config = config or MimirConfig()
+        if db_path:
+            self.db_path = Path(db_path).expanduser()
+        else:
+            self.db_path = self._config.db_path
+
+        # Ensure directory exists
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Thread-local storage for connections
+        self._local = threading.local()
+        self._lock = threading.Lock()
+
+        # Initialize schema
+        self._init_db()
+
+        logger.info("Mímir's Well initialized at %s", self.db_path)
+
+    # ─── Connection Management ────────────────────────────────────────────
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Get a thread-local database connection with row factory."""
+        conn = getattr(self._local, 'conn', None)
+        if conn is None:
+            conn = sqlite3.connect(str(self.db_path))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            for pragma in PRAGMAS:
+                if "WAL" in pragma:
+                    cursor.execute(pragma)
+            conn.execute("PRAGMA foreign_keys = ON")
+            self._local.conn = conn
+        return conn
+
+    def _write(self, fn):
+        """Execute a write operation with thread-safe commit.
+
+        Args:
+            fn: Callable that takes a connection and performs the write
+
+        Returns:
+            The return value of fn
+        """
+        with self._lock:
+            conn = self._get_conn()
+            result = fn(conn)
+            conn.commit()
+            return result
+
+    def _commit(self):
+        """Explicitly commit the current transaction."""
+        conn = self._get_conn()
+        conn.commit()
+
+    # ─── Schema Initialization ───────────────────────────────────────────
+
+    def _init_db(self):
+        """Initialize all tables, indexes, FTS, and triggers."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+
+        for table_sql in ALL_TABLES:
+            cursor.execute(table_sql)
+
+        for index_sql in INDEXES:
+            cursor.execute(index_sql)
+
+        for fts_sql in FTS_TABLES:
+            try:
+                cursor.execute(fts_sql)
+            except sqlite3.OperationalError:
+                pass  # FTS table already exists
+
+        # With content= mode, rebuild FTS indexes from existing data
+        for fts_name in ["memories_fts", "knowledge_fts", "saga_events_fts"]:
+            try:
+                cursor.execute(f"INSERT INTO {fts_name}({fts_name}) VALUES('rebuild')")
+            except sqlite3.OperationalError:
+                pass  # Table doesn't exist yet or no data
+
+        for trigger_sql in FTS_TRIGGERS:
+            try:
+                cursor.execute(trigger_sql)
+            except sqlite3.OperationalError:
+                pass  # Trigger already exists
+
+        conn.commit()
+
+    # ─── CRUD: Memories ──────────────────────────────────────────────────
+
+    def add_memory(self, content: str, category: str = "general",
+                   tags: Optional[Any] = None, importance: int = 5,
+                   emotional_valence: float = 0.0) -> int:
+        """Store a new memory.
+
+        Args:
+            content: The memory content to store
+            category: Category label (e.g., 'preference', 'lesson')
+            tags: Tags as string or list
+            importance: Importance 1-10 (default 5)
+            emotional_valence: Emotion -1.0 to 1.0 (default 0.0)
+
+        Returns:
+            The ID of the new memory, or -1 if blocked
+        """
+        if isinstance(tags, list):
+            tags = json.dumps(tags)
+        emotional_valence = max(-1.0, min(1.0, emotional_valence))
+        importance = max(1, min(10, importance))
+
+        def _insert(conn):
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO memories (content, category, tags, importance, emotional_valence)
+                VALUES (?, ?, ?, ?, ?)
+            """, (content, category, tags, importance, emotional_valence))
+            return cursor.lastrowid
+        return self._write(_insert)
+
+    def get_memory(self, memory_id: int) -> Optional[Dict]:
+        """Retrieve a specific memory by ID."""
+        cursor = self._get_conn().cursor()
+        cursor.execute("SELECT * FROM memories WHERE id = ?", (memory_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def search_memories(self, query: str, category: Optional[str] = None,
+                        limit: int = 20) -> List[Dict]:
+        """Search memories by content using LIKE.
+
+        For full-text search, use fts_search() instead.
+        """
+        cursor = self._get_conn().cursor()
+        if category:
+            cursor.execute("""
+                SELECT * FROM memories
+                WHERE content LIKE ? AND category = ?
+                ORDER BY importance DESC, timestamp DESC
+                LIMIT ?
+            """, (f"%{query}%", category, limit))
+        else:
+            cursor.execute("""
+                SELECT * FROM memories
+                WHERE content LIKE ?
+                ORDER BY importance DESC, timestamp DESC
+                LIMIT ?
+            """, (f"%{query}%", limit))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def update_memory(self, memory_id: int, **kwargs) -> bool:
+        """Update specific fields of a memory."""
+        allowed_fields = {'content', 'category', 'tags', 'importance', 'emotional_valence'}
+        updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
+        if not updates:
+            return False
+
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [memory_id]
+
+        def _update(conn):
+            conn.execute(f"UPDATE memories SET {set_clause} WHERE id = ?", values)
+            return True
+        return self._write(_update)
+
+    def delete_memory(self, memory_id: int) -> bool:
+        """Delete a memory by ID (also removes access log entries)."""
+        def _delete(conn):
+            conn.execute("DELETE FROM memory_access_log WHERE memory_id = ?", (memory_id,))
+            conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            return True
+        return self._write(_delete)
+
+    # ─── CRUD: Saga Events ───────────────────────────────────────────────
+
+    def add_saga_event(self, event_type: str, entity_id: Optional[str] = None,
+                       data: Optional[Dict] = None,
+                       participants: Optional[List[str]] = None) -> int:
+        """Record a saga (life event) in the memory system."""
+        participants_json = json.dumps(participants) if participants else None
+        data_json = json.dumps(data) if data else None
+
+        def _insert(conn):
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO saga_events (event_type, entity_id, data, participants)
+                VALUES (?, ?, ?, ?)
+            """, (event_type, entity_id, data_json, participants_json))
+            return cursor.lastrowid
+        return self._write(_insert)
+
+    # ─── CRUD: Entities ──────────────────────────────────────────────────
+
+    def add_entity(self, entity_id: str, entity_type: str,
+                   components: Optional[Dict] = None,
+                   state: Optional[Dict] = None) -> bool:
+        """Add or update an entity in the knowledge graph."""
+        comps_json = json.dumps(components) if components else "{}"
+        state_json = json.dumps(state) if state else "{}"
+
+        def _upsert(conn):
+            conn.execute("""
+                INSERT OR REPLACE INTO entities (entity_id, entity_type, components, state, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (entity_id, entity_type, comps_json, state_json))
+            return True
+        return self._write(_upsert)
+
+    def get_entity(self, entity_id: str) -> Optional[Dict]:
+        """Retrieve an entity by ID."""
+        cursor = self._get_conn().cursor()
+        cursor.execute("SELECT * FROM entities WHERE entity_id = ?", (entity_id,))
+        row = cursor.fetchone()
+        if row:
+            data = dict(row)
+            data['components'] = json.loads(data.get('components', '{}'))
+            data['state'] = json.loads(data.get('state', '{}'))
+            return data
+        return None
+
+    def get_entities_by_type(self, entity_type: str) -> List[Dict]:
+        """Get all entities of a specific type."""
+        cursor = self._get_conn().cursor()
+        cursor.execute("SELECT * FROM entities WHERE entity_type = ?", (entity_type,))
+        results = []
+        for row in cursor.fetchall():
+            data = dict(row)
+            data['components'] = json.loads(data.get('components', '{}'))
+            data['state'] = json.loads(data.get('state', '{}'))
+            results.append(data)
+        return results
+
+    # ─── CRUD: Relationships ──────────────────────────────────────────────
+
+    def set_relationship(self, entity_a: str, entity_b: str,
+                         relationship_type: str = "related",
+                         strength: int = 5,
+                         metadata: Optional[Dict] = None) -> bool:
+        """Create or update a relationship between two entities."""
+        meta_json = json.dumps(metadata) if metadata else None
+
+        def _upsert(conn):
+            conn.execute("""
+                INSERT OR REPLACE INTO relationships (entity_a, entity_b, relationship_type, strength, metadata)
+                VALUES (?, ?, ?, ?, ?)
+            """, (entity_a, entity_b, relationship_type, strength, meta_json))
+            return True
+        return self._write(_upsert)
+
+    def get_relationship_strength(self, entity_a: str, entity_b: str) -> Optional[int]:
+        """Get the strength of a relationship."""
+        cursor = self._get_conn().cursor()
+        cursor.execute("""
+            SELECT strength FROM relationships
+            WHERE (entity_a = ? AND entity_b = ?) OR (entity_a = ? AND entity_b = ?)
+        """, (entity_a, entity_b, entity_b, entity_a))
+        row = cursor.fetchone()
+        return row['strength'] if row else None
+
+    # ─── CRUD: Conversations ─────────────────────────────────────────────
+
+    def save_conversation(self, session_id: str, participants: List[str],
+                          transcript: Optional[str] = None,
+                          summary: Optional[str] = None):
+        """Save a conversation session."""
+        def _upsert(conn):
+            conn.execute("""
+                INSERT OR REPLACE INTO conversations
+                (session_id, participants, transcript, summary, timestamp)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (session_id, json.dumps(participants), transcript, summary))
+        self._write(_upsert)
+
+    def get_conversation(self, session_id: str) -> Optional[Dict]:
+        """Retrieve a conversation by session ID."""
+        cursor = self._get_conn().cursor()
+        cursor.execute("SELECT * FROM conversations WHERE session_id = ?", (session_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    # ─── CRUD: Knowledge ──────────────────────────────────────────────────
+
+    def add_knowledge(self, domain: str, content: str,
+                      source: Optional[str] = None,
+                      confidence: float = 1.0) -> int:
+        """Store a piece of knowledge.
+
+        Args:
+            domain: Knowledge domain (e.g., 'norse_mythology', 'python')
+            content: The knowledge content
+            source: Where this knowledge came from
+            confidence: 0.0-1.0 confidence level
+        """
+        confidence = max(0.0, min(1.0, confidence))
+
+        def _insert(conn):
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO knowledge (domain, content, source, confidence)
+                VALUES (?, ?, ?, ?)
+            """, (domain, content, source, confidence))
+            return cursor.lastrowid
+        return self._write(_insert)
+
+    def search_knowledge(self, domain: str, query: str,
+                          limit: int = 20) -> List[Dict]:
+        """Search knowledge within a domain."""
+        cursor = self._get_conn().cursor()
+        cursor.execute("""
+            SELECT * FROM knowledge
+            WHERE domain = ? AND content LIKE ?
+            ORDER BY confidence DESC, created_at DESC
+            LIMIT ?
+        """, (domain, f"%{query}%", limit))
+        return [dict(row) for row in cursor.fetchall()]
+
+    # ─── FTS5 Search ──────────────────────────────────────────────────────
+
+    def fts_search(self, table: str, query: str, limit: int = 20) -> List[Dict]:
+        """Full-text search using FTS5 on a source table.
+
+        Args:
+            table: One of 'memories', 'knowledge', 'saga_events'
+            query: FTS5 query string
+            limit: Max results
+        """
+        fts_table = f"{table}_fts"
+        try:
+            cursor = self._get_conn().cursor()
+            cursor.execute(f"""
+                SELECT src.*, fts.rank
+                FROM {fts_table} fts
+                JOIN {table} src ON src.id = fts.rowid
+                WHERE {fts_table} MATCH ?
+                ORDER BY fts.rank
+                LIMIT ?
+            """, (query, limit))
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.OperationalError:
+            return self.search_memories(query, limit=limit)
+
+    # ─── Recall Methods ───────────────────────────────────────────────────
+
+    def recall_by_importance(self, min_importance: int = 7,
+                              category: Optional[str] = None,
+                              limit: int = 10) -> List[Dict]:
+        """Retrieve high-importance memories."""
+        cursor = self._get_conn().cursor()
+        if category:
+            cursor.execute("""
+                SELECT * FROM memories
+                WHERE importance >= ? AND category = ?
+                ORDER BY importance DESC, timestamp DESC LIMIT ?
+            """, (min_importance, category, limit))
+        else:
+            cursor.execute("""
+                SELECT * FROM memories
+                WHERE importance >= ?
+                ORDER BY importance DESC, timestamp DESC LIMIT ?
+            """, (min_importance, limit))
+        results = [dict(row) for row in cursor.fetchall()]
+        for m in results:
+            self._log_access(m["id"], "recall_core")
+        return results
+
+    def recall_recent(self, hours: int = 24, limit: int = 5) -> List[Dict]:
+        """Retrieve memories from the last N hours."""
+        cursor = self._get_conn().cursor()
+        cursor.execute("""
+            SELECT * FROM memories
+            WHERE timestamp >= datetime('now', ?)
+            ORDER BY importance DESC, timestamp DESC LIMIT ?
+        """, (f'-{hours} hours', limit))
+        results = [dict(row) for row in cursor.fetchall()]
+        for m in results:
+            self._log_access(m["id"], "recall_recent")
+        return results
+
+    def recall_by_mood(self, target_valence: float = 0.0,
+                        tolerance: float = 0.3,
+                        limit: int = 5,
+                        category: Optional[str] = None) -> List[Dict]:
+        """Recall memories matching an emotional context."""
+        cursor = self._get_conn().cursor()
+        query = """
+            SELECT *, ABS(emotional_valence - ?) AS valence_distance
+            FROM memories WHERE ABS(emotional_valence - ?) <= ?
+        """
+        params = [target_valence, target_valence, tolerance]
+        if category:
+            query += " AND category = ?"
+            params.append(category)
+        query += " ORDER BY valence_distance ASC, importance DESC LIMIT ?"
+        params.append(limit)
+        cursor.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+    # ─── Access Logging ──────────────────────────────────────────────────
+
+    def _log_access(self, memory_id: int, access_type: str = "recall") -> None:
+        """Log that a memory was accessed (for Ebbinghaus tracking)."""
+        try:
+            self._write(
+                lambda conn: conn.execute(
+                    "INSERT INTO memory_access_log (memory_id, access_type) VALUES (?, ?)",
+                    (memory_id, access_type),
+                )
+            )
+        except Exception:
+            pass  # Non-critical
+
+    def log_access(self, memory_id: int, access_type: str = "recall") -> None:
+        """Public interface for access logging."""
+        self._log_access(memory_id, access_type)
+
+    # ─── Ebbinghaus Decay ─────────────────────────────────────────────────
+
+    def decay(self, half_life_days: float = 30.0, min_importance: int = 1) -> Dict[str, int]:
+        """Apply Ebbinghaus forgetting curve to memory importance.
+
+        Memories decay over time unless reinforced. The half-life determines
+        how quickly importance fades. Accessing a memory resets its decay.
+
+        Args:
+            half_life_days: Days for importance to halve (default 30)
+            min_importance: Below this threshold, memories are prunable
+
+        Returns:
+            Dict with 'decayed', 'pruned', 'reinforced' counts
+        """
+        decay_factor = 0.5 ** (1.0 / half_life_days)
+        conn = self._get_conn()
+        now = datetime.now()
+        decayed = 0
+        pruned = 0
+        reinforced = 0
+
+        cursor = conn.execute("SELECT id, importance, timestamp FROM memories")
+        rows = cursor.fetchall()
+
+        for row in rows:
+            mem_id, importance, timestamp_str = row["id"], row["importance"], row["timestamp"]
+            try:
+                timestamp = datetime.fromisoformat(timestamp_str) if timestamp_str else now
+            except (ValueError, TypeError):
+                timestamp = now
+
+            # Get last access time
+            last_accessed_row = conn.execute(
+                "SELECT MAX(accessed_at) FROM memory_access_log WHERE memory_id = ?",
+                (mem_id,)
+            ).fetchone()
+            last_accessed_str = last_accessed_row[0] if last_accessed_row and last_accessed_row[0] else timestamp_str
+
+            try:
+                last_accessed = datetime.fromisoformat(last_accessed_str) if last_accessed_str else timestamp
+            except (ValueError, TypeError):
+                last_accessed = timestamp
+
+            days_since = (now - last_accessed).total_seconds() / 86400.0
+            new_importance = importance * (decay_factor ** days_since)
+
+            if new_importance < min_importance:
+                conn.execute("UPDATE memories SET importance = ? WHERE id = ?",
+                            (max(1, round(new_importance)), mem_id))
+                pruned += 1
+            else:
+                conn.execute("UPDATE memories SET importance = ? WHERE id = ?",
+                            (max(1, min(10, round(new_importance))), mem_id))
+                decayed += 1
+
+        # Reinforce recently accessed memories
+        yesterday = (now - timedelta(hours=24)).isoformat()
+        recent = conn.execute(
+            "SELECT DISTINCT mal.memory_id FROM memory_access_log mal "
+            "WHERE mal.accessed_at > ?", (yesterday,)
+        ).fetchall()
+        for (mem_id,) in recent:
+            current = conn.execute("SELECT importance FROM memories WHERE id = ?", (mem_id,)).fetchone()
+            if current and current[0] < 10:
+                conn.execute("UPDATE memories SET importance = MIN(?, 10) WHERE id = ?",
+                            (current[0] + 0.5, mem_id))
+                reinforced += 1
+
+        self._commit()
+        return {"decayed": decayed, "pruned": pruned, "reinforced": reinforced}
+
+    # ─── Consolidation ────────────────────────────────────────────────────
+
+    def consolidate(self) -> Dict[str, int]:
+        """Session-end consolidation: Ebbinghaus decay + promotion + pruning.
+
+        Three operations:
+        1. DECAY: Memories not accessed in 30+ days lose 1 importance point
+        2. PROMOTE: Memories accessed 3+ times in 7 days gain 1 importance
+        3. PRUNE: Relationships below strength 1 are deleted
+
+        Returns:
+            Dict with counts: {"decayed": N, "promoted": N, "pruned": N}
+        """
+        report = {"decayed": 0, "promoted": 0, "pruned": 0}
+        cursor = self._get_conn().cursor()
+
+        # 1. Decay old, unaccessed memories
+        cursor.execute("""
+            UPDATE memories
+            SET importance = MAX(1, importance - 1)
+            WHERE importance > 5
+            AND timestamp < datetime('now', '-30 days')
+            AND id NOT IN (
+                SELECT memory_id FROM memory_access_log
+                WHERE accessed_at > datetime('now', '-7 days')
+            )
+        """)
+        report["decayed"] = cursor.rowcount
+
+        # 2. Promote frequently-accessed memories
+        cursor.execute("""
+            UPDATE memories
+            SET importance = MIN(10, importance + 1)
+            WHERE id IN (
+                SELECT memory_id FROM memory_access_log
+                WHERE accessed_at > datetime('now', '-7 days')
+                GROUP BY memory_id
+                HAVING COUNT(*) >= 3
+            )
+            AND importance < 9
+        """)
+        report["promoted"] = cursor.rowcount
+
+        # 3. Prune weak relationships
+        cursor.execute("DELETE FROM relationships WHERE strength < 1.0")
+        report["pruned"] = cursor.rowcount
+
+        # 4. Clean up old access logs (keep 90 days)
+        cursor.execute("""
+            DELETE FROM memory_access_log
+            WHERE accessed_at < datetime('now', '-90 days')
+        """)
+
+        self._commit()
+        logger.info("Mímir consolidation: decayed=%d, promoted=%d, pruned=%d",
+                     report["decayed"], report["promoted"], report["pruned"])
+        return report
+
+    # ─── Knowledge Promotion ──────────────────────────────────────────────
+
+    def promote_to_knowledge(self, min_importance: int = 8) -> Dict[str, int]:
+        """Promote high-importance memories to knowledge entries.
+
+        Memories above the threshold are converted into knowledge entries
+        with higher confidence — crystallizing experience into wisdom.
+
+        Args:
+            min_importance: Minimum importance to promote (default 8)
+
+        Returns:
+            Dict with 'promoted' and 'skipped' counts
+        """
+        conn = self._get_conn()
+        promoted = 0
+        skipped = 0
+
+        cursor = conn.execute(
+            "SELECT id, content, category, emotional_valence, timestamp FROM memories "
+            "WHERE importance >= ?", (min_importance,)
+        )
+
+        for row in cursor.fetchall():
+            mem_id, content, category, valence, timestamp_str = (
+                row["id"], row["content"], row["category"],
+                row["emotional_valence"], row["timestamp"]
+            )
+            existing = conn.execute(
+                "SELECT id FROM knowledge WHERE content = ?", (content,)
+            ).fetchone()
+            if existing:
+                skipped += 1
+                continue
+
+            confidence = compute_confidence_for_promotion(min_importance, valence or 0.0)
+            conn.execute(
+                "INSERT INTO knowledge (domain, content, confidence, source, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (category or "general", content, round(confidence, 2),
+                 f"promoted_from_memory_{mem_id}", timestamp_str or datetime.now().isoformat())
+            )
+            promoted += 1
+
+        self._commit()
+        return {"promoted": promoted, "skipped": skipped}
+
+    # ─── Contradiction Detection ──────────────────────────────────────────
+
+    def detect_contradictions(self, category: Optional[str] = None,
+                               limit: int = 20) -> List[Dict[str, Any]]:
+        """Detect contradictory memories — conflicting beliefs or facts.
+
+        Scans for:
+        1. Opposing preferences (love/hate, like/dislike, etc.)
+        2. Valence inversions (same topic, opposite emotions)
+        3. Conflicting knowledge entries (same domain, divergent confidence)
+        """
+        cursor = self._get_conn().cursor()
+        contradictions = []
+        search_limit = limit * 3
+
+        # Strategy 1: Opposing preference pairs
+        preference_pairs = [
+            ("love", "hate"), ("like", "dislike"), ("prefer", "avoid"),
+            ("always", "never"), ("best", "worst"), ("favorite", "least"),
+        ]
+
+        for positive, negative in preference_pairs:
+            cursor.execute("""
+                SELECT id, content, category, emotional_valence
+                FROM memories WHERE emotional_valence > 0.2
+                AND content LIKE ? ORDER BY importance DESC LIMIT ?
+            """, (f"%{positive}%", search_limit))
+            pos = cursor.fetchall()
+
+            cursor.execute("""
+                SELECT id, content, category, emotional_valence
+                FROM memories WHERE emotional_valence < -0.2
+                AND content LIKE ? ORDER BY importance DESC LIMIT ?
+            """, (f"%{negative}%", search_limit))
+            neg = cursor.fetchall()
+
+            for p in pos:
+                p_words = set(w.lower() for w in (p["content"] or "").split() if len(w) > 4)
+                if not p_words:
+                    continue
+                for n in neg:
+                    n_words = set(w.lower() for w in (n["content"] or "").split() if len(w) > 4)
+                    shared = p_words & n_words
+                    if len(shared) >= 2:
+                        contradictions.append({
+                            "type": "opposing_preference",
+                            "memory_a": {"id": p["id"], "content": (p["content"] or "")[:80], "valence": p["emotional_valence"]},
+                            "memory_b": {"id": n["id"], "content": (n["content"] or "")[:80], "valence": n["emotional_valence"]},
+                            "shared_terms": list(shared)[:5],
+                            "confidence": min(1.0, len(shared) * 0.3),
+                            "positive_keyword": positive,
+                            "negative_keyword": negative,
+                        })
+
+            if len(contradictions) >= limit * 2:
+                break
+
+        # Strategy 2: Category valence inversions
+        category_clause = "AND category = ?" if category else ""
+        params = [category] if category else []
+        cursor.execute(f"""
+            SELECT id, content, category, emotional_valence FROM memories
+            WHERE emotional_valence > 0.3 {category_clause}
+            ORDER BY ABS(emotional_valence) DESC LIMIT ?
+        """, params + [search_limit])
+        positive_mems = cursor.fetchall()
+
+        for row in positive_mems:
+            mem_cat = row["category"]
+            neg_params = [mem_cat]
+            cursor.execute("""
+                SELECT id, content, category, emotional_valence FROM memories
+                WHERE category = ? AND emotional_valence < -0.3
+                ORDER BY emotional_valence ASC LIMIT 5
+            """, neg_params)
+            negative_mems = cursor.fetchall()
+
+            for neg_row in negative_mems:
+                a_words = set(w.lower() for w in (row["content"] or "").split() if len(w) > 4)
+                b_words = set(w.lower() for w in (neg_row["content"] or "").split() if len(w) > 4)
+                shared = a_words & b_words
+                if shared:
+                    contradictions.append({
+                        "type": "valence_inversion",
+                        "memory_a": {"id": row["id"], "content": (row["content"] or "")[:80], "valence": row["emotional_valence"]},
+                        "memory_b": {"id": neg_row["id"], "content": (neg_row["content"] or "")[:80], "valence": neg_row["emotional_valence"]},
+                        "shared_terms": list(shared)[:5],
+                        "confidence": min(1.0, len(shared) * 0.25 + 0.3),
+                        "category": mem_cat,
+                    })
+
+            if len(contradictions) >= limit * 2:
+                break
+
+        # Strategy 3: Conflicting knowledge entries
+        cursor.execute("""
+            SELECT domain, COUNT(*) as cnt, MIN(confidence) as min_conf,
+                    MAX(confidence) as max_conf FROM knowledge
+            GROUP BY domain HAVING cnt > 1 AND (max_conf - min_conf) > 0.1
+            ORDER BY cnt DESC LIMIT 20
+        """)
+
+        for domain_row in cursor.fetchall():
+            domain = domain_row["domain"]
+            max_conf = domain_row["max_conf"]
+            min_conf = domain_row["min_conf"]
+
+            cursor.execute("""
+                SELECT id, content, domain, confidence FROM knowledge
+                WHERE domain = ? AND confidence = ? ORDER BY RANDOM() LIMIT 3
+            """, (domain, max_conf))
+            high_rows = cursor.fetchall()
+
+            cursor.execute("""
+                SELECT id, content, domain, confidence FROM knowledge
+                WHERE domain = ? AND confidence = ? ORDER BY RANDOM() LIMIT 3
+            """, (domain, min_conf))
+            low_rows = cursor.fetchall()
+
+            for h in high_rows:
+                for l in low_rows:
+                    if h["id"] == l["id"]:
+                        continue
+                    h_words = set(w.lower() for w in (h["content"] or "").split() if len(w) > 4)
+                    l_words = set(w.lower() for w in (l["content"] or "").split() if len(w) > 4)
+                    shared = h_words & l_words
+                    if len(shared) >= 2:
+                        contradictions.append({
+                            "type": "knowledge_conflict",
+                            "entry_a": {"id": h["id"], "content": (h["content"] or "")[:80], "confidence": h["confidence"]},
+                            "entry_b": {"id": l["id"], "content": (l["content"] or "")[:80], "confidence": l["confidence"]},
+                            "domain": domain,
+                            "confidence": abs(h["confidence"] - l["confidence"]),
+                            "shared_terms": list(shared)[:5],
+                        })
+
+            if len(contradictions) >= limit * 2:
+                break
+
+        # Deduplicate and rank
+        seen_keys = set()
+        unique = []
+        for c in contradictions:
+            key = frozenset(c.get("shared_terms", []) + [c["type"]])
+            if key not in seen_keys:
+                seen_keys.add(key)
+                unique.append(c)
+
+        return sorted(unique, key=lambda x: x.get("confidence", 0), reverse=True)[:limit]
+
+    # ─── Integrity Check & Repair ──────────────────────────────────────────
+
+    def integrity_check(self, repair: bool = False) -> Dict[str, Any]:
+        """Check database integrity and optionally repair issues.
+
+        Args:
+            repair: If True, fix detected issues automatically
+
+        Returns:
+            Dict with check results and repairs made
+        """
+        return check_integrity(self._get_conn(), repair=repair)
+
+    def repair(self, aggressive: bool = False) -> Dict[str, Any]:
+        """Repair the database — fix orphans, inconsistencies, and corruption.
+
+        Args:
+            aggressive: If True, also vacuum and deep clean
+
+        Returns:
+            Dict with repair statistics
+        """
+        return repair_database(self._get_conn(), aggressive=aggressive)
+
+    # ─── Backup & Export ──────────────────────────────────────────────────
+
+    def backup_to(self, backup_path: str):
+        """Create a backup of the database."""
+        return backup_database(self._get_conn(), self.db_path, backup_path)
+
+    def backup_with_rotation(self, backup_dir: Optional[str] = None,
+                              max_backups: int = 7) -> str:
+        """Create a timestamped backup with rotation."""
+        return _backup_with_rotation(self._get_conn(), self.db_path, backup_dir, max_backups)
+
+    def restore_from(self, backup_path: str) -> bool:
+        """Restore the database from a backup file."""
+        return restore_from_backup(self.db_path, backup_path)
+
+    def github_backup(self, repo_url: Optional[str] = None, branch: str = "main",
+                       commit_msg: str = "auto: Mímir's Well backup",
+                       strip_personal: bool = True) -> Dict[str, Any]:
+        """Push a sanitized backup to GitHub."""
+        return github_backup(
+            self.db_path, self._get_conn(),
+            repo_url=repo_url, branch=branch,
+            commit_msg=commit_msg, strip_personal=strip_personal,
+        )
+
+    def export_to_json(self, export_path: str) -> Dict:
+        """Export all data to JSON."""
+        return export_to_json(self._get_conn(), export_path)
+
+    # ─── FTS Rebuild ─────────────────────────────────────────────────────
+
+    def rebuild_fts(self):
+        """Rebuild all FTS5 indexes from source tables.
+
+        With content= (external content) mode, FTS5 automatically
+        syncs with the content tables. This method triggers a full rebuild
+        to ensure consistency.
+        """
+        def _rebuild(conn):
+            cursor = conn.cursor()
+            # For content= mode FTS5, use the rebuild command
+            for fts in ["memories_fts", "knowledge_fts", "saga_events_fts"]:
+                try:
+                    cursor.execute(f"INSERT INTO {fts}({fts}) VALUES('rebuild')")
+                except sqlite3.OperationalError:
+                    pass  # Table may not exist yet
+        self._write(_rebuild)
+        logger.info("Mímir: FTS5 indexes rebuilt")
+
+    # ─── Health Check ────────────────────────────────────────────────────
+
+    def health_check(self) -> Dict[str, Any]:
+        """Verify database health and connection integrity."""
+        result = {"healthy": True, "issues": []}
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM memories")
+            result["memory_count"] = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM knowledge")
+            result["knowledge_count"] = cursor.fetchone()[0]
+        except Exception as e:
+            result["healthy"] = False
+            result["issues"].append(f"Query failed: {e}")
+
+        try:
+            cursor.execute("PRAGMA quick_check")
+            integrity = cursor.fetchone()[0]
+            if integrity != "ok":
+                result["healthy"] = False
+                result["issues"].append(f"Integrity: {integrity}")
+            result["integrity"] = integrity
+        except Exception as e:
+            result["issues"].append(f"Integrity check skipped: {e}")
+
+        return result
+
+    # ─── Statistics ──────────────────────────────────────────────────────
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get memory health statistics."""
+        import os
+        cursor = self._get_conn().cursor()
+        stats = {}
+
+        for table in ["memories", "entities", "relationships", "knowledge",
+                       "saga_events", "conversations", "memory_access_log"]:
+            try:
+                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                stats[table] = cursor.fetchone()[0]
+            except sqlite3.OperationalError:
+                stats[table] = 0
+
+        # Importance distribution
+        cursor.execute("SELECT importance, COUNT(*) FROM memories GROUP BY importance ORDER BY importance")
+        stats["importance_distribution"] = {str(row[0]): row[1] for row in cursor.fetchall()}
+
+        # DB size
+        try:
+            db_size = os.path.getsize(self.db_path)
+            stats["db_size_mb"] = round(db_size / (1024 * 1024), 2)
+        except OSError:
+            stats["db_size_mb"] = 0
+
+        return stats
+
+    # ─── Context Manager ─────────────────────────────────────────────────
+
+    def close(self):
+        """Close the database connection."""
+        conn = getattr(self._local, 'conn', None)
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def __del__(self):
+        self.close()

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from mimir_well.schema import (
-    ALL_TABLES, FTS_TABLES, FTS_TRIGGERS, INDEXES, PRAGMAS
+    ALL_TABLES, FTS_TABLES, FTS_TRIGGERS, INDEXES, PRAGMAS, SCHEMA_VERSION
 )
 from mimir_well.config import MimirConfig
 from mimir_well.decay import (
@@ -149,6 +149,12 @@ class RunaMemory:
                 cursor.execute(trigger_sql)
             except sqlite3.OperationalError:
                 pass  # Trigger already exists
+
+        # Track schema version
+        cursor.execute(
+            "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES (?, ?)",
+            ("schema_version", str(SCHEMA_VERSION)),
+        )
 
         conn.commit()
 

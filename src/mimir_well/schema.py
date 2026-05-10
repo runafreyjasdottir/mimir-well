@@ -7,6 +7,13 @@ SQL CREATE statements, indexes, and FTS5 triggers for the memory database.
 # Schema version for migration tracking
 SCHEMA_VERSION = 2
 
+SCHEMA_META_TABLE = """
+CREATE TABLE IF NOT EXISTS _schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+)
+"""
+
 # ─── Table creation statements ─────────────────────────────────────────────
 
 MEMORIES_TABLE = """
@@ -134,6 +141,7 @@ PRAGMAS = [
 # ─── All table SQL aggregated for convenience ──────────────────────────────
 
 ALL_TABLES = [
+    SCHEMA_META_TABLE,
     MEMORIES_TABLE,
     SAGA_EVENTS_TABLE,
     ENTITIES_TABLE,

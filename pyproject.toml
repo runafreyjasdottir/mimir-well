@@ -27,7 +27,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-[project.dependencies]
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/runafreyjasdottir/mimir-well"

@@ -566,42 +566,76 @@ class RunaMemory:
 
     # ─── FTS5 Search ──────────────────────────────────────────────────────
 
-    def fts_search(self, table: str, query: str, limit: int = 20) -> List[Dict]:
+    def fts_search(self, table: str, query: str, limit: int = 20,
+                     user_id: Optional[str] = None) -> List[Dict]:
         """Full-text search using FTS5 on a source table.
 
         Args:
             table: One of 'memories', 'knowledge', 'saga_events'
             query: FTS5 query string
             limit: Max results
+            user_id: Filter by user namespace (None = all users).
         """
         fts_table = f"{table}_fts"
         try:
-            cursor = self._get_conn().cursor()
-            cursor.execute(f"""
-                SELECT src.*, fts.rank
-                FROM {fts_table} fts
-                JOIN {table} src ON src.id = fts.rowid
-                WHERE {fts_table} MATCH ?
-                ORDER BY fts.rank
-                LIMIT ?
-            """, (query, limit))
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            if user_id and table == "memories":
+                cursor.execute(f"""
+                    SELECT src.*, fts.rank
+                    FROM {fts_table} fts
+                    JOIN {table} src ON src.id = fts.rowid
+                    WHERE {fts_table} MATCH ? AND src.user_id = ?
+                    ORDER BY fts.rank
+                    LIMIT ?
+                """, (query, user_id, limit))
+            else:
+                cursor.execute(f"""
+                    SELECT src.*, fts.rank
+                    FROM {fts_table} fts
+                    JOIN {table} src ON src.id = fts.rowid
+                    WHERE {fts_table} MATCH ?
+                    ORDER BY fts.rank
+                    LIMIT ?
+                """, (query, limit))
             return [dict(row) for row in cursor.fetchall()]
         except sqlite3.OperationalError:
-            return self.search_memories(query, limit=limit)
+            return self.search_memories(query, limit=limit, user_id=user_id)
 
     # ─── Recall Methods ───────────────────────────────────────────────────
 
     def recall_by_importance(self, min_importance: int = 7,
                               category: Optional[str] = None,
-                              limit: int = 10) -> List[Dict]:
-        """Retrieve high-importance memories."""
-        cursor = self._get_conn().cursor()
-        if category:
+                              limit: int = 10,
+                              user_id: Optional[str] = None) -> List[Dict]:
+        """Retrieve high-importance memories.
+
+        Args:
+            min_importance: Minimum importance threshold (default 7).
+            category: Filter by category.
+            limit: Max results.
+            user_id: Filter by user namespace (None = all users).
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        if category and user_id:
+            cursor.execute("""
+                SELECT * FROM memories
+                WHERE importance >= ? AND category = ? AND user_id = ?
+                ORDER BY importance DESC, timestamp DESC LIMIT ?
+            """, (min_importance, category, user_id, limit))
+        elif category:
             cursor.execute("""
                 SELECT * FROM memories
                 WHERE importance >= ? AND category = ?
                 ORDER BY importance DESC, timestamp DESC LIMIT ?
             """, (min_importance, category, limit))
+        elif user_id:
+            cursor.execute("""
+                SELECT * FROM memories
+                WHERE importance >= ? AND user_id = ?
+                ORDER BY importance DESC, timestamp DESC LIMIT ?
+            """, (min_importance, user_id, limit))
         else:
             cursor.execute("""
                 SELECT * FROM memories
@@ -613,14 +647,29 @@ class RunaMemory:
             self._log_access(m["id"], "recall_core")
         return results
 
-    def recall_recent(self, hours: int = 24, limit: int = 5) -> List[Dict]:
-        """Retrieve memories from the last N hours."""
-        cursor = self._get_conn().cursor()
-        cursor.execute("""
-            SELECT * FROM memories
-            WHERE timestamp >= datetime('now', ?)
-            ORDER BY importance DESC, timestamp DESC LIMIT ?
-        """, (f'-{hours} hours', limit))
+    def recall_recent(self, hours: int = 24, limit: int = 5,
+                      user_id: Optional[str] = None) -> List[Dict]:
+        """Retrieve memories from the last N hours.
+
+        Args:
+            hours: How far back to look (default 24).
+            limit: Max results.
+            user_id: Filter by user namespace (None = all users).
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        if user_id:
+            cursor.execute("""
+                SELECT * FROM memories
+                WHERE timestamp >= datetime('now', ?) AND user_id = ?
+                ORDER BY importance DESC, timestamp DESC LIMIT ?
+            """, (f'-{hours} hours', user_id, limit))
+        else:
+            cursor.execute("""
+                SELECT * FROM memories
+                WHERE timestamp >= datetime('now', ?)
+                ORDER BY importance DESC, timestamp DESC LIMIT ?
+            """, (f'-{hours} hours', limit))
         results = [dict(row) for row in cursor.fetchall()]
         for m in results:
             self._log_access(m["id"], "recall_recent")
@@ -629,8 +678,17 @@ class RunaMemory:
     def recall_by_mood(self, target_valence: float = 0.0,
                         tolerance: float = 0.3,
                         limit: int = 5,
-                        category: Optional[str] = None) -> List[Dict]:
-        """Recall memories matching an emotional context."""
+                        category: Optional[str] = None,
+                        user_id: Optional[str] = None) -> List[Dict]:
+        """Recall memories matching an emotional context.
+
+        Args:
+            target_valence: Target emotional valence (-1.0 to 1.0).
+            tolerance: How close the valence must be (default 0.3).
+            limit: Max results.
+            category: Filter by category.
+            user_id: Filter by user namespace (None = all users).
+        """
         cursor = self._get_conn().cursor()
         query = """
             SELECT *, ABS(emotional_valence - ?) AS valence_distance
@@ -640,6 +698,9 @@ class RunaMemory:
         if category:
             query += " AND category = ?"
             params.append(category)
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
         query += " ORDER BY valence_distance ASC, importance DESC LIMIT ?"
         params.append(limit)
         cursor.execute(query, params)
@@ -930,7 +991,7 @@ class RunaMemory:
 
     # ─── Consolidation ────────────────────────────────────────────────────
 
-    def consolidate(self) -> Dict[str, int]:
+    def consolidate(self, user_id: Optional[str] = None) -> Dict[str, int]:
         """Session-end consolidation: Ebbinghaus decay + promotion + pruning.
 
         Three operations:
@@ -938,27 +999,34 @@ class RunaMemory:
         2. PROMOTE: Memories accessed 3+ times in 7 days gain 1 importance
         3. PRUNE: Relationships below strength 1 are deleted
 
+        Args:
+            user_id: User namespace to consolidate (None = all users).
+
         Returns:
             Dict with counts: {"decayed": N, "promoted": N, "pruned": N}
         """
         report = {"decayed": 0, "promoted": 0, "pruned": 0}
-        cursor = self._get_conn().cursor()
+        conn = self._get_conn()
+        cursor = conn.cursor()
+
+        user_filter = " AND user_id = ?" if user_id else ""
+        user_params = [user_id] if user_id else []
 
         # 1. Decay old, unaccessed memories
-        cursor.execute("""
+        cursor.execute(f"""
             UPDATE memories
             SET importance = MAX(1, importance - 1)
             WHERE importance > 5
-            AND timestamp < datetime('now', '-30 days')
+            AND timestamp < datetime('now', '-30 days'){user_filter}
             AND id NOT IN (
                 SELECT memory_id FROM memory_access_log
                 WHERE accessed_at > datetime('now', '-7 days')
             )
-        """)
+        """, user_params)
         report["decayed"] = cursor.rowcount
 
         # 2. Promote frequently-accessed memories
-        cursor.execute("""
+        cursor.execute(f"""
             UPDATE memories
             SET importance = MIN(10, importance + 1)
             WHERE id IN (
@@ -967,12 +1035,23 @@ class RunaMemory:
                 GROUP BY memory_id
                 HAVING COUNT(*) >= 3
             )
-            AND importance < 9
-        """)
+            AND importance < 9{user_filter}
+        """, user_params)
         report["promoted"] = cursor.rowcount
 
         # 3. Prune weak relationships
-        cursor.execute("DELETE FROM relationships WHERE strength < 1.0")
+        # NOTE: relationships table doesn't have user_id yet;
+        # filter only when the column exists (added in future migration)
+        if user_id:
+            try:
+                cursor.execute(
+                    "DELETE FROM relationships WHERE strength < 1.0 AND user_id = ?",
+                    (user_id,),
+                )
+            except Exception:
+                cursor.execute("DELETE FROM relationships WHERE strength < 1.0")
+        else:
+            cursor.execute("DELETE FROM relationships WHERE strength < 1.0")
         report["pruned"] = cursor.rowcount
 
         # 4. Clean up old access logs (keep 90 days)
@@ -988,7 +1067,8 @@ class RunaMemory:
 
     # ─── Knowledge Promotion ──────────────────────────────────────────────
 
-    def promote_to_knowledge(self, min_importance: int = 8) -> Dict[str, int]:
+    def promote_to_knowledge(self, min_importance: int = 8,
+                            user_id: Optional[str] = None) -> Dict[str, int]:
         """Promote high-importance memories to knowledge entries.
 
         Memories above the threshold are converted into knowledge entries
@@ -996,6 +1076,7 @@ class RunaMemory:
 
         Args:
             min_importance: Minimum importance to promote (default 8)
+            user_id: Filter by user namespace (None = all users).
 
         Returns:
             Dict with 'promoted' and 'skipped' counts
@@ -1004,10 +1085,16 @@ class RunaMemory:
         promoted = 0
         skipped = 0
 
-        cursor = conn.execute(
-            "SELECT id, content, category, emotional_valence, timestamp FROM memories "
-            "WHERE importance >= ?", (min_importance,)
-        )
+        if user_id:
+            cursor = conn.execute(
+                "SELECT id, content, category, emotional_valence, timestamp FROM memories "
+                "WHERE importance >= ? AND user_id = ?", (min_importance, user_id)
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT id, content, category, emotional_valence, timestamp FROM memories "
+                "WHERE importance >= ?", (min_importance,)
+            )
 
         for row in cursor.fetchall():
             mem_id, content, category, valence, timestamp_str = (
@@ -1036,17 +1123,27 @@ class RunaMemory:
     # ─── Contradiction Detection ──────────────────────────────────────────
 
     def detect_contradictions(self, category: Optional[str] = None,
-                               limit: int = 20) -> List[Dict[str, Any]]:
+                               limit: int = 20,
+                               user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Detect contradictory memories — conflicting beliefs or facts.
 
         Scans for:
         1. Opposing preferences (love/hate, like/dislike, etc.)
         2. Valence inversions (same topic, opposite emotions)
         3. Conflicting knowledge entries (same domain, divergent confidence)
+
+        Args:
+            category: Filter by category.
+            limit: Max contradictions to return.
+            user_id: Filter by user namespace (None = all users).
         """
-        cursor = self._get_conn().cursor()
+        conn = self._get_conn()
+        cursor = conn.cursor()
         contradictions = []
         search_limit = limit * 3
+
+        user_filter = " AND user_id = ?" if user_id else ""
+        user_params = [user_id] if user_id else []
 
         # Strategy 1: Opposing preference pairs
         preference_pairs = [
@@ -1055,18 +1152,18 @@ class RunaMemory:
         ]
 
         for positive, negative in preference_pairs:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT id, content, category, emotional_valence
                 FROM memories WHERE emotional_valence > 0.2
-                AND content LIKE ? ORDER BY importance DESC LIMIT ?
-            """, (f"%{positive}%", search_limit))
+                AND content LIKE ?{user_filter} ORDER BY importance DESC LIMIT ?
+            """, [f"%{positive}%"] + user_params + [search_limit])
             pos = cursor.fetchall()
 
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT id, content, category, emotional_valence
                 FROM memories WHERE emotional_valence < -0.2
-                AND content LIKE ? ORDER BY importance DESC LIMIT ?
-            """, (f"%{negative}%", search_limit))
+                AND content LIKE ?{user_filter} ORDER BY importance DESC LIMIT ?
+            """, [f"%{negative}%"] + user_params + [search_limit])
             neg = cursor.fetchall()
 
             for p in pos:
@@ -1092,22 +1189,25 @@ class RunaMemory:
 
         # Strategy 2: Category valence inversions
         category_clause = "AND category = ?" if category else ""
-        params = [category] if category else []
+        cat_params = [category] if category else []
         cursor.execute(f"""
             SELECT id, content, category, emotional_valence FROM memories
-            WHERE emotional_valence > 0.3 {category_clause}
+            WHERE emotional_valence > 0.3 {category_clause}{user_filter}
             ORDER BY ABS(emotional_valence) DESC LIMIT ?
-        """, params + [search_limit])
+        """, cat_params + user_params + [search_limit])
         positive_mems = cursor.fetchall()
 
         for row in positive_mems:
             mem_cat = row["category"]
-            neg_params = [mem_cat]
-            cursor.execute("""
+            neg_base_params = [mem_cat]
+            if user_id:
+                neg_base_params.append(user_id)
+            user_neg_filter = " AND user_id = ?" if user_id else ""
+            cursor.execute(f"""
                 SELECT id, content, category, emotional_valence FROM memories
-                WHERE category = ? AND emotional_valence < -0.3
+                WHERE category = ? AND emotional_valence < -0.3{user_neg_filter}
                 ORDER BY emotional_valence ASC LIMIT 5
-            """, neg_params)
+            """, neg_base_params)
             negative_mems = cursor.fetchall()
 
             for neg_row in negative_mems:

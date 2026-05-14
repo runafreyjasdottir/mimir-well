@@ -391,7 +391,8 @@ class RunaMemory:
                 action=AuditAction.DELETE,
                 source=source,
                 content_hash=content_hash,
-                metadata={"action": "delete", "user_id": user_id},
+                user_id=user_id,
+                metadata={"action": "delete"},
             )
         return result
 

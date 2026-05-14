@@ -5,7 +5,7 @@ SQL CREATE statements, indexes, and FTS5 triggers for the memory database.
 """
 
 # Schema version for migration tracking
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_META_TABLE = """
 CREATE TABLE IF NOT EXISTS _schema_meta (

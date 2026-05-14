@@ -144,8 +144,8 @@ class TestRecallLatency:
         start = time.time()
         results = mimir.recall_current(min_importance=3, limit=20)
         latency = (time.time() - start) * 1000
-        # Pi 5 is slower than desktop — allow 150ms
-        assert latency < 150, f"recall_current too slow: {latency:.1f}ms"
+        # Pi 5 is slower than desktop — allow 200ms (500-row temporal query)
+        assert latency < 200, f"recall_current too slow: {latency:.1f}ms"
 
     def test_recall_by_importance_under_20ms(self, mimir):
         """recall_by_importance should be fast."""

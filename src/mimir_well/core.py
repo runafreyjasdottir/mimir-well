@@ -566,8 +566,10 @@ class RunaMemory:
 
     # ─── FTS5 Search ──────────────────────────────────────────────────────
 
+    VALID_FTS_TABLES = {"memories", "knowledge", "saga_events"}
+
     def fts_search(self, table: str, query: str, limit: int = 20,
-                     user_id: Optional[str] = None) -> List[Dict]:
+                    user_id: Optional[str] = None) -> List[Dict]:
         """Full-text search using FTS5 on a source table.
 
         Args:
@@ -576,6 +578,8 @@ class RunaMemory:
             limit: Max results
             user_id: Filter by user namespace (None = all users).
         """
+        if table not in self.VALID_FTS_TABLES:
+            raise ValueError(f"Invalid FTS table '{table}'. Must be one of {self.VALID_FTS_TABLES}")
         fts_table = f"{table}_fts"
         try:
             conn = self._get_conn()

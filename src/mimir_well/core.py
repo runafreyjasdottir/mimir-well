@@ -349,8 +349,11 @@ class RunaMemory:
         ).hexdigest()[:16]
 
         def _update(conn):
-            conn.execute(f"UPDATE memories SET {set_clause} WHERE id = ?", values)
-            return True
+            cursor = conn.execute(
+                f"UPDATE memories SET {set_clause} WHERE id = ? AND user_id = ?",
+                values + [user_id],
+            )
+            return cursor.rowcount > 0
         result = self._write(_update)
 
         # T7-2: Audit trail — log the update action
@@ -379,9 +382,14 @@ class RunaMemory:
         content_hash = hashlib.sha256(str(memory_id).encode()).hexdigest()[:16]
 
         def _delete(conn):
-            conn.execute("DELETE FROM memory_access_log WHERE memory_id = ?", (memory_id,))
-            conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-            return True
+            conn.execute(
+                "DELETE FROM memory_access_log WHERE memory_id = ?", (memory_id,)
+            )
+            cursor = conn.execute(
+                "DELETE FROM memories WHERE id = ? AND user_id = ?",
+                (memory_id, user_id),
+            )
+            return cursor.rowcount > 0
         result = self._write(_delete)
 
         # Log delete after successful removal

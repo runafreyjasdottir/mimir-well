@@ -130,47 +130,73 @@ class WyrdGraph:
         self._db.commit()
         return cursor.lastrowid
 
-    def remove_edge(self, source: str, target: str, relationship_type: str) -> bool:
+    def remove_edge(self, source: str, target: str, relationship_type: str,
+                     user_id: Optional[str] = None) -> bool:
         """Remove a specific edge.
 
         Args:
             source: Source entity ID.
             target: Target entity ID.
             relationship_type: Type of relationship.
+            user_id: Filter by user namespace (None = all users).
 
         Returns:
             True if an edge was removed, False if not found.
         """
-        cursor = self._db.execute(
-            """
-            DELETE FROM wyrd_edges
-            WHERE source_entity = ? AND target_entity = ? AND relationship_type = ?
-            """,
-            (source, target, relationship_type),
-        )
+        if user_id:
+            cursor = self._db.execute(
+                """
+                DELETE FROM wyrd_edges
+                WHERE source_entity = ? AND target_entity = ?
+                      AND relationship_type = ? AND user_id = ?
+                """,
+                (source, target, relationship_type, user_id),
+            )
+        else:
+            cursor = self._db.execute(
+                """
+                DELETE FROM wyrd_edges
+                WHERE source_entity = ? AND target_entity = ? AND relationship_type = ?
+                """,
+                (source, target, relationship_type),
+            )
         self._db.commit()
         return cursor.rowcount > 0
 
-    def get_edge(self, source: str, target: str, relationship_type: str) -> Optional[Dict[str, Any]]:
+    def get_edge(self, source: str, target: str, relationship_type: str,
+                  user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get a specific edge by its triple.
 
         Args:
             source: Source entity ID.
             target: Target entity ID.
             relationship_type: Type of relationship.
+            user_id: Filter by user namespace (None = all users).
 
         Returns:
             Edge dict or None if not found.
         """
-        row = self._db.execute(
-            """
-            SELECT id, source_entity, target_entity, relationship_type,
-                   strength, created_at, updated_at, metadata
-            FROM wyrd_edges
-            WHERE source_entity = ? AND target_entity = ? AND relationship_type = ?
-            """,
-            (source, target, relationship_type),
-        ).fetchone()
+        if user_id:
+            row = self._db.execute(
+                """
+                SELECT id, source_entity, target_entity, relationship_type,
+                       strength, created_at, updated_at, metadata, user_id
+                FROM wyrd_edges
+                WHERE source_entity = ? AND target_entity = ?
+                      AND relationship_type = ? AND user_id = ?
+                """,
+                (source, target, relationship_type, user_id),
+            ).fetchone()
+        else:
+            row = self._db.execute(
+                """
+                SELECT id, source_entity, target_entity, relationship_type,
+                       strength, created_at, updated_at, metadata, user_id
+                FROM wyrd_edges
+                WHERE source_entity = ? AND target_entity = ? AND relationship_type = ?
+                """,
+                (source, target, relationship_type),
+            ).fetchone()
 
         if row is None:
             return None
@@ -184,6 +210,7 @@ class WyrdGraph:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "metadata": json.loads(row["metadata"]) if row["metadata"] else {},
+            "user_id": row["user_id"],
         }
 
     def get_edges_from(self, entity: str, relationship_type: Optional[str] = None,
@@ -336,6 +363,7 @@ class WyrdGraph:
         relationship_type: Optional[str] = None,
         max_depth: int = 3,
         min_strength: float = 0.0,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """BFS traversal from start entity, following outgoing edges.
 
@@ -347,6 +375,7 @@ class WyrdGraph:
             relationship_type: Optional filter by relationship type.
             max_depth: Maximum traversal depth (default 3).
             min_strength: Minimum edge strength to follow (default 0.0).
+            user_id: Filter by user namespace (None = all users).
 
         Returns:
             List of dicts with: entity, distance, path, relationship, strength.
@@ -373,6 +402,9 @@ class WyrdGraph:
             if min_strength > 0:
                 sql += " AND strength >= ?"
                 params.append(min_strength)
+            if user_id:
+                sql += " AND user_id = ?"
+                params.append(user_id)
 
             for row in self._db.execute(sql, params).fetchall():
                 target = row["target_entity"]
@@ -398,6 +430,7 @@ class WyrdGraph:
         entity: str,
         max_depth: int = 2,
         min_strength: float = 0.0,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Traverse incoming edges (entities pointing TO this entity).
 
@@ -405,6 +438,7 @@ class WyrdGraph:
             entity: Entity ID to start from.
             max_depth: Maximum reverse traversal depth.
             min_strength: Minimum edge strength to follow.
+            user_id: Filter by user namespace (None = all users).
 
         Returns:
             List of dicts with: entity, distance, path, relationship, strength.
@@ -427,6 +461,9 @@ class WyrdGraph:
             if min_strength > 0:
                 sql += " AND strength >= ?"
                 params.append(min_strength)
+            if user_id:
+                sql += " AND user_id = ?"
+                params.append(user_id)
 
             for row in self._db.execute(sql, params).fetchall():
                 source = row["source_entity"]
@@ -447,7 +484,8 @@ class WyrdGraph:
 
         return results
 
-    def get_related(self, entity: str, max_depth: int = 2) -> Dict[str, Any]:
+    def get_related(self, entity: str, max_depth: int = 2,
+                    user_id: Optional[str] = None) -> Dict[str, Any]:
         """Get all entities related to this entity within max_depth hops.
 
         Combines outgoing and incoming traversals into a complete
@@ -456,12 +494,13 @@ class WyrdGraph:
         Args:
             entity: Entity ID to explore.
             max_depth: Maximum traversal depth (default 2).
+            user_id: Filter by user namespace (None = all users).
 
         Returns:
             Dict with: entity, outgoing, incoming, total_connections.
         """
-        outgoing = self.traverse(entity, max_depth=max_depth)
-        incoming = self._get_incoming(entity, max_depth=max_depth)
+        outgoing = self.traverse(entity, max_depth=max_depth, user_id=user_id)
+        incoming = self._get_incoming(entity, max_depth=max_depth, user_id=user_id)
 
         return {
             "entity": entity,
@@ -472,27 +511,48 @@ class WyrdGraph:
 
     # ── Statistics ─────────────────────────────────────────────────────────────
 
-    def edge_count(self) -> int:
-        """Return total number of edges in the graph."""
-        row = self._db.execute("SELECT COUNT(*) FROM wyrd_edges").fetchone()
+    def edge_count(self, user_id: Optional[str] = None) -> int:
+        """Return total number of edges in the graph, optionally filtered by user."""
+        if user_id:
+            row = self._db.execute(
+                "SELECT COUNT(*) FROM wyrd_edges WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        else:
+            row = self._db.execute("SELECT COUNT(*) FROM wyrd_edges").fetchone()
         return row[0] if row else 0
 
-    def entity_count(self) -> int:
-        """Return number of distinct entities in the graph."""
-        row = self._db.execute(
-            "SELECT COUNT(DISTINCT e) FROM ("
-            "  SELECT source_entity AS e FROM wyrd_edges "
-            "  UNION "
-            "  SELECT target_entity AS e FROM wyrd_edges"
-            ")"
-        ).fetchone()
+    def entity_count(self, user_id: Optional[str] = None) -> int:
+        """Return number of distinct entities in the graph, optionally filtered by user."""
+        if user_id:
+            row = self._db.execute(
+                "SELECT COUNT(DISTINCT e) FROM ("
+                "  SELECT source_entity AS e FROM wyrd_edges WHERE user_id = ?"
+                "  UNION"
+                "  SELECT target_entity AS e FROM wyrd_edges WHERE user_id = ?"
+                ")",
+                (user_id, user_id),
+            ).fetchone()
+        else:
+            row = self._db.execute(
+                "SELECT COUNT(DISTINCT e) FROM ("
+                "  SELECT source_entity AS e FROM wyrd_edges "
+                "  UNION "
+                "  SELECT target_entity AS e FROM wyrd_edges"
+                ")"
+            ).fetchone()
         return row[0] if row else 0
 
-    def relationship_types(self) -> List[str]:
-        """Return all distinct relationship types in the graph."""
-        rows = self._db.execute(
-            "SELECT DISTINCT relationship_type FROM wyrd_edges ORDER BY relationship_type"
-        ).fetchall()
+    def relationship_types(self, user_id: Optional[str] = None) -> List[str]:
+        """Return all distinct relationship types in the graph, optionally filtered by user."""
+        if user_id:
+            rows = self._db.execute(
+                "SELECT DISTINCT relationship_type FROM wyrd_edges WHERE user_id = ? ORDER BY relationship_type",
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = self._db.execute(
+                "SELECT DISTINCT relationship_type FROM wyrd_edges ORDER BY relationship_type"
+            ).fetchall()
         return [r[0] for r in rows]
 
     # ── Migration ─────────────────────────────────────────────────────────────

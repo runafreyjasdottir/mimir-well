@@ -1459,7 +1459,11 @@ class RunaMemory:
     # ─── Context Manager ─────────────────────────────────────────────────
 
     def close(self):
-        """Close the database connection."""
+        """Close the database connections (RunaMemory and AuditTrail)."""
+        # Close audit trail connection
+        if hasattr(self, 'audit') and self.audit is not None:
+            self.audit.close()
+        # Close main memory connection
         conn = getattr(self._local, 'conn', None)
         if conn:
             try:

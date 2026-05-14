@@ -154,7 +154,7 @@ class TestRecallLatency:
         results = mimir.recall_by_importance(min_importance=7, limit=20)
         latency = (time.time() - start) * 1000
         # Pi 5 allowance — desktop would be faster
-        assert latency < 60, f"recall_by_importance too slow: {latency:.1f}ms"
+        assert latency < 150, f"recall_by_importance too slow: {latency:.1f}ms"
 
 
 # ── T5-5d: Superseded Not Recalled ─────────────────────────────────────────

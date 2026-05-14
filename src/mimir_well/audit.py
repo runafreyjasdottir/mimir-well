@@ -1,32 +1,23 @@
+"""Mímir Well — Audit Trail for memory traceability.
+
+Records every write/update/delete/supersede action on memories,
+providing a tamper-detection chain via content hashes and timestamps.
+
+T8-5: Refactored to use thread-local connection reuse (matches RunaMemory pattern).
 """
-Mímir's Well — Audit Trail
-=====================================
-Logs every memory write/update/delete with source, timestamp, and
-content hash for full traceability.
-
-Like the Norns at Urðr's Well, the audit trail records every action
-against the fabric of memory — who wrote it, when, and what it said.
-Nothing is erased from the record. The Well witnesses all.
-
-ᚢ ᚱ ᛞ ᚱ — Urðr's Well holds not just what is, but what was done.
-"""
-
-from __future__ import annotations
 
 import json
 import logging
 import sqlite3
+import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
-# ── Audit Actions ────────────────────────────────────────────────────────────
-
 class AuditAction:
-    """Constants for audit log actions."""
+    """Constants for audit action types."""
     STORE = "store"
     UPDATE = "update"
     DELETE = "delete"
@@ -34,11 +25,9 @@ class AuditAction:
     COMPRESS = "compress"
 
 
-# ── Audit Entry ───────────────────────────────────────────────────────────────
-
 @dataclass
 class AuditEntry:
-    """A single audit trail entry — a witness mark in the Well's ledger."""
+    """A single audit trail entry."""
     id: int
     memory_id: int
     action: str
@@ -62,10 +51,11 @@ class AuditEntry:
         }
 
 
-# ── Audit Trail ───────────────────────────────────────────────────────────────
-
 class AuditTrail:
     """Memory audit trail — records every write/update/delete for traceability.
+
+    Uses thread-local connections for safe concurrent access, matching
+    the RunaMemory pattern. No more open/close per call.
 
     Usage:
         # Log a memory write
@@ -81,19 +71,44 @@ class AuditTrail:
         timeline = audit.timeline(memory_id=42)
     """
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str) -> None:
         """Initialize the audit trail.
 
         Args:
-            db_path: Path to the SQLite database.
+            db_path: Path to the SQLite database (shared with RunaMemory).
         """
         self.db_path = db_path
+        self._local = threading.local()
+        self._lock = threading.Lock()
 
     def _get_conn(self) -> sqlite3.Connection:
-        """Get a database connection."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+        """Get a thread-local database connection with row factory.
+
+        Reuses the connection per thread instead of opening/closing
+        on every call. Matches RunaMemory's pattern.
+        """
+        conn = getattr(self._local, 'conn', None)
+        if conn is None:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA foreign_keys = ON")
+            self._local.conn = conn
+            logger.debug("AuditTrail: created new thread-local connection")
         return conn
+
+    def _commit(self) -> None:
+        """Commit the current transaction on the thread-local connection."""
+        conn = self._get_conn()
+        conn.commit()
+
+    def close(self) -> None:
+        """Close the thread-local database connection."""
+        conn = getattr(self._local, 'conn', None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
+            logger.debug("AuditTrail: closed thread-local connection")
 
     def log(
         self,
@@ -127,21 +142,18 @@ class AuditTrail:
         metadata_json = json.dumps(metadata or {})
 
         conn = self._get_conn()
-        try:
-            cursor = conn.execute(
-                """INSERT INTO memory_audit (memory_id, action, source, content_hash, metadata, user_id)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (memory_id, action, source, content_hash, metadata_json, user_id),
-            )
-            conn.commit()
-            audit_id = cursor.lastrowid
-            logger.debug(
-                f"Audit: {action} memory_id={memory_id} source={source} "
-                f"hash={content_hash[:8]}... (audit_id={audit_id})"
-            )
-            return audit_id
-        finally:
-            conn.close()
+        cursor = conn.execute(
+            """INSERT INTO memory_audit (memory_id, action, source, content_hash, metadata, user_id)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (memory_id, action, source, content_hash, metadata_json, user_id),
+        )
+        self._commit()
+        audit_id = cursor.lastrowid
+        logger.debug(
+            f"Audit: {action} memory_id={memory_id} source={source} "
+            f"hash={content_hash[:8]}... (audit_id={audit_id})"
+        )
+        return audit_id
 
     def query(
         self,
@@ -167,8 +179,8 @@ class AuditTrail:
         Returns:
             List of AuditEntry objects, most recent first.
         """
-        clauses = []
-        params = []
+        clauses: List[str] = []
+        params: List[Any] = []
 
         if memory_id is not None:
             clauses.append("memory_id = ?")
@@ -197,23 +209,20 @@ class AuditTrail:
         params.append(limit)
 
         conn = self._get_conn()
-        try:
-            rows = conn.execute(sql, params).fetchall()
-            return [
-                AuditEntry(
-                    id=row["id"],
-                    memory_id=row["memory_id"],
-                    action=row["action"],
-                    source=row["source"],
-                    content_hash=row["content_hash"],
-                    timestamp=row["timestamp"],
-                    metadata=json.loads(row["metadata"] or "{}"),
-                    user_id=row["user_id"] if "user_id" in row.keys() else "runa",
-                )
-                for row in rows
-            ]
-        finally:
-            conn.close()
+        rows = conn.execute(sql, params).fetchall()
+        return [
+            AuditEntry(
+                id=row["id"],
+                memory_id=row["memory_id"],
+                action=row["action"],
+                source=row["source"],
+                content_hash=row["content_hash"],
+                timestamp=row["timestamp"],
+                metadata=json.loads(row["metadata"] or "{}"),
+                user_id=row["user_id"] if "user_id" in row.keys() else "runa",
+            )
+            for row in rows
+        ]
 
     def timeline(self, memory_id: int, limit: int = 50) -> List[AuditEntry]:
         """Get the full audit timeline for a specific memory.
@@ -227,42 +236,62 @@ class AuditTrail:
         """
         return self.query(memory_id=memory_id, limit=limit)
 
-    def stats(self) -> Dict[str, Any]:
+    def stats(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """Get audit trail statistics.
+
+        Args:
+            user_id: Optional user namespace filter (None = all users).
 
         Returns:
             Dictionary with total entries, action counts, source counts,
             and time range.
         """
         conn = self._get_conn()
-        try:
-            total = conn.execute("SELECT COUNT(*) FROM memory_audit").fetchone()[0]
 
+        if user_id:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM memory_audit WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0]
+            action_counts = dict(
+                conn.execute(
+                    "SELECT action, COUNT(*) FROM memory_audit WHERE user_id = ? GROUP BY action",
+                    (user_id,),
+                ).fetchall()
+            )
+            source_counts = dict(
+                conn.execute(
+                    "SELECT source, COUNT(*) FROM memory_audit WHERE user_id = ? GROUP BY source",
+                    (user_id,),
+                ).fetchall()
+            )
+            time_range = conn.execute(
+                "SELECT MIN(timestamp), MAX(timestamp) FROM memory_audit WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        else:
+            total = conn.execute("SELECT COUNT(*) FROM memory_audit").fetchone()[0]
             action_counts = dict(
                 conn.execute(
                     "SELECT action, COUNT(*) FROM memory_audit GROUP BY action"
                 ).fetchall()
             )
-
             source_counts = dict(
                 conn.execute(
                     "SELECT source, COUNT(*) FROM memory_audit GROUP BY source"
                 ).fetchall()
             )
-
             time_range = conn.execute(
                 "SELECT MIN(timestamp), MAX(timestamp) FROM memory_audit"
             ).fetchone()
 
-            return {
-                "total_entries": total,
-                "action_counts": action_counts,
-                "source_counts": source_counts,
-                "earliest": time_range[0],
-                "latest": time_range[1],
-            }
-        finally:
-            conn.close()
+        return {
+            "total_entries": total,
+            "action_counts": action_counts,
+            "source_counts": source_counts,
+            "earliest": time_range[0],
+            "latest": time_range[1],
+        }
 
     def verify_integrity(self, memory_id: int, current_hash: str) -> Dict[str, Any]:
         """Verify a memory's content hash against the audit trail.

@@ -684,6 +684,8 @@ class RunaMemory:
         importance: Optional[int] = None,
         tags: Optional[Any] = None,
         emotional_valence: Optional[float] = None,
+        user_id: str = "runa",
+        source: str = "supersede",
     ) -> int:
         """Mark an old memory as superseded by a new one.
 
@@ -699,6 +701,9 @@ class RunaMemory:
             importance: Importance for the new memory (inherits from old if None).
             tags: Tags (inherits from old if None).
             emotional_valence: (inherits from old if None).
+            user_id: User namespace (default 'runa'). New memory is attributed
+                to this user. Old memory must belong to this user to supersede.
+            source: Source label for audit trail.
 
         Returns:
             The ID of the new (superseding) memory.
@@ -720,18 +725,21 @@ class RunaMemory:
             tags=_tags,
             importance=_importance,
             emotional_valence=_valence,
+            user_id=user_id,
+            source=source,
         )
 
         if new_id < 0:
             return new_id  # Store blocked
 
-        # Mark old memory as superseded
+        # Mark old memory as superseded (only if owned by this user)
         def _mark_superseded(conn):
-            conn.execute(
-                "UPDATE memories SET is_current=0, superseded_by=? WHERE id=?",
-                (new_id, old_memory_id),
+            cursor = conn.execute(
+                "UPDATE memories SET is_current=0, superseded_by=? WHERE id=? AND user_id=?",
+                (new_id, old_memory_id, user_id),
             )
-        self._write(_mark_superseded)
+            return cursor.rowcount > 0
+        result = self._write(_mark_superseded)
 
         logger.info(
             "Memory %d superseded by %d: '%s' → '%s'",

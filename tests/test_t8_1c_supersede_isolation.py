@@ -48,23 +48,20 @@ def test_supersede_cross_user_blocked():
         old_id = mem.add_memory("Runa's preference", category="preference", importance=7, user_id="runa")
         new_id = mem.supersede(old_id, "Volmarr trying to supersede", user_id="volmarr")
 
-        # A new memory IS created (under volmarr's namespace)
-        assert new_id > 0, "supersede should still create a new memory"
+        # Cross-user supersede fails — get_memory filters by user_id
+        # so volmarr can't see runa's memory, supersede returns -1
+        assert new_id == -1, (
+            f"Cross-user supersede should return -1, got {new_id}"
+        )
 
-        # But the OLD memory should NOT be marked as superseded
+        # The original memory should remain untouched
         old = mem.get_memory(old_id)
         assert old["is_current"] == 1, (
-            f"Old memory should remain current when superseded by different user, "
-            f"got is_current={old['is_current']}"
+            f"Old memory should remain current, got is_current={old['is_current']}"
         )
         assert old.get("superseded_by") is None, (
             f"Old memory should not have superseded_by set, got {old.get('superseded_by')}"
         )
-
-        # The new memory exists under volmarr
-        new = mem.get_memory(new_id)
-        assert new["user_id"] == "volmarr"
-        assert new["content"] == "Volmarr trying to supersede"
 
     finally:
         os.unlink(db_path)

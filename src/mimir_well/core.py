@@ -275,10 +275,27 @@ class RunaMemory:
             )
         return memory_id
 
-    def get_memory(self, memory_id: int) -> Optional[Dict]:
-        """Retrieve a specific memory by ID."""
-        cursor = self._get_conn().cursor()
-        cursor.execute("SELECT * FROM memories WHERE id = ?", (memory_id,))
+    def get_memory(self, memory_id: int, user_id: Optional[str] = None) -> Optional[Dict]:
+        """Retrieve a specific memory by ID.
+
+        Args:
+            memory_id: The memory ID to look up.
+            user_id: If provided, only return the memory if it belongs to this user.
+                None (default) returns the memory regardless of ownership.
+
+        Returns:
+            Dict of memory fields, or None if not found (or not owned by user_id).
+        """
+        conn = self._get_conn()
+        if user_id:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM memories WHERE id = ? AND user_id = ?",
+                (memory_id, user_id),
+            )
+        else:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM memories WHERE id = ?", (memory_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
 
@@ -714,9 +731,12 @@ class RunaMemory:
         Returns:
             The ID of the new (superseding) memory.
         """
-        old = self.get_memory(old_memory_id)
+        old = self.get_memory(old_memory_id, user_id=user_id)
         if old is None:
-            logger.warning("Cannot supersede memory %d — not found.", old_memory_id)
+            logger.warning(
+                "Cannot supersede memory %d — not found or not owned by user '%s'.",
+                old_memory_id, user_id,
+            )
             return -1
 
         # Inherit from old memory if not explicitly provided

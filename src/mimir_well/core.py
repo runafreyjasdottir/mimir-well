@@ -9,6 +9,7 @@ knowledge promotion.
 """
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -22,6 +23,8 @@ from mimir_well.schema import (
     ALL_TABLES, FTS_TABLES, FTS_TRIGGERS, INDEXES, PRAGMAS, SCHEMA_VERSION
 )
 from mimir_well.config import MimirConfig
+from mimir_well.guard import MemoryGuard, GuardResult, GuardSeverity
+from mimir_well.audit import AuditTrail, AuditAction
 from mimir_well.decay import (
     compute_ebbinghaus_decay, compute_reinforcement_boost,
     compute_confidence_for_promotion
@@ -33,6 +36,36 @@ from mimir_well.backup import (
 )
 
 logger = logging.getLogger("mimir_well")
+
+# ── T5-3: Memory Type Classification ──────────────────────────────────────
+
+CATEGORY_TYPE_MAP = {
+    "nse_character": "episodic",
+    "nse_location": "episodic",
+    "nse_relationship": "episodic",
+    "saga_moment": "episodic",
+    "preference": "semantic",
+    "lesson": "procedural",
+    "knowledge": "semantic",
+    "relationship": "semantic",
+    "science_discovery": "semantic",
+    "spiritual": "semantic",
+    "sexual": "episodic",
+    "dream": "episodic",
+    "brilliant": "episodic",
+    "general": "episodic",
+}
+
+VALID_MEMORY_TYPES = {"episodic", "semantic", "procedural", "implicit"}
+
+
+def infer_memory_type(category: str) -> str:
+    """Auto-classify a memory type from its category.
+
+    Returns one of: 'episodic', 'semantic', 'procedural', 'implicit'.
+    Falls back to 'episodic' for unknown categories.
+    """
+    return CATEGORY_TYPE_MAP.get(category, "episodic")
 
 
 class RunaMemory:
@@ -76,6 +109,13 @@ class RunaMemory:
         # Thread-local storage for connections
         self._local = threading.local()
         self._lock = threading.Lock()
+
+        # T7-1: Memory Guard for injection protection
+        self.guard = MemoryGuard()
+
+        # T7-2: Audit Trail for traceability
+        from mimir_well.audit import AuditTrail
+        self.audit = AuditTrail(str(self.db_path))
 
         # Initialize schema
         self._init_db()
@@ -162,7 +202,10 @@ class RunaMemory:
 
     def add_memory(self, content: str, category: str = "general",
                    tags: Optional[Any] = None, importance: int = 5,
-                   emotional_valence: float = 0.0) -> int:
+                   emotional_valence: float = 0.0,
+                   memory_type: Optional[str] = None,
+                   source: str = "mimir",
+                   user_id: str = "runa") -> int:
         """Store a new memory.
 
         Args:
@@ -171,6 +214,10 @@ class RunaMemory:
             tags: Tags as string or list
             importance: Importance 1-10 (default 5)
             emotional_valence: Emotion -1.0 to 1.0 (default 0.0)
+            memory_type: 'episodic', 'semantic', 'procedural', or 'implicit'.
+                If None, auto-classified from category via infer_memory_type().
+            source: Origin of the write ('mimir', 'hermes', 'runa_remember', 'eir', 'nse')
+            user_id: User namespace for multi-tenant isolation (default 'runa')
 
         Returns:
             The ID of the new memory, or -1 if blocked
@@ -180,14 +227,53 @@ class RunaMemory:
         emotional_valence = max(-1.0, min(1.0, emotional_valence))
         importance = max(1, min(10, importance))
 
+        # T7-1: Validate content through MemoryGuard
+        guard_result = self.guard.validate_write(
+            content=content,
+            source=source,
+            category=category,
+            importance=importance,
+            tags=json.loads(tags) if isinstance(tags, str) else tags,
+        )
+        if not guard_result.is_valid:
+            logger.warning(
+                "Memory write BLOCKED by Guard: %s (content: %.50s...)",
+                guard_result.reason, content[:50],
+            )
+            return -1
+        # Use sanitized content if available
+        if guard_result.sanitized_content:
+            content = guard_result.sanitized_content
+
+        # T5-3: Auto-classify memory type from category if not provided
+        if memory_type is None:
+            memory_type = infer_memory_type(category)
+
         def _insert(conn):
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO memories (content, category, tags, importance, emotional_valence)
-                VALUES (?, ?, ?, ?, ?)
-            """, (content, category, tags, importance, emotional_valence))
+                INSERT INTO memories (content, category, tags, importance, emotional_valence, memory_type, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (content, category, tags, importance, emotional_valence, memory_type, user_id))
             return cursor.lastrowid
-        return self._write(_insert)
+        memory_id = self._write(_insert)
+
+        # T7-2: Audit trail — log the store action
+        if memory_id > 0:
+            self.audit.log(
+                memory_id=memory_id,
+                action=AuditAction.STORE,
+                source=source,
+                content_hash=guard_result.content_hash or hashlib.sha256(content.encode()).hexdigest()[:16],
+                user_id=user_id,
+                metadata={
+                    "category": category,
+                    "importance": importance,
+                    "trust_level": guard_result.trust_level.name if guard_result.trust_level else "UNKNOWN",
+                    "guard_severity": guard_result.severity.value,
+                },
+            )
+        return memory_id
 
     def get_memory(self, memory_id: int) -> Optional[Dict]:
         """Retrieve a specific memory by ID."""
@@ -197,19 +283,39 @@ class RunaMemory:
         return dict(row) if row else None
 
     def search_memories(self, query: str, category: Optional[str] = None,
-                        limit: int = 20) -> List[Dict]:
+                        limit: int = 20, user_id: Optional[str] = None) -> List[Dict]:
         """Search memories by content using LIKE.
 
         For full-text search, use fts_search() instead.
+
+        Args:
+            query: Search string.
+            category: Filter by category.
+            limit: Max results.
+            user_id: Filter by user namespace (None = all users).
         """
         cursor = self._get_conn().cursor()
-        if category:
+        if category and user_id:
+            cursor.execute("""
+                SELECT * FROM memories
+                WHERE content LIKE ? AND category = ? AND user_id = ?
+                ORDER BY importance DESC, timestamp DESC
+                LIMIT ?
+            """, (f"%{query}%", category, user_id, limit))
+        elif category:
             cursor.execute("""
                 SELECT * FROM memories
                 WHERE content LIKE ? AND category = ?
                 ORDER BY importance DESC, timestamp DESC
                 LIMIT ?
             """, (f"%{query}%", category, limit))
+        elif user_id:
+            cursor.execute("""
+                SELECT * FROM memories
+                WHERE content LIKE ? AND user_id = ?
+                ORDER BY importance DESC, timestamp DESC
+                LIMIT ?
+            """, (f"%{query}%", user_id, limit))
         else:
             cursor.execute("""
                 SELECT * FROM memories
@@ -219,8 +325,16 @@ class RunaMemory:
             """, (f"%{query}%", limit))
         return [dict(row) for row in cursor.fetchall()]
 
-    def update_memory(self, memory_id: int, **kwargs) -> bool:
-        """Update specific fields of a memory."""
+    def update_memory(self, memory_id: int, source: str = "unknown",
+                     user_id: str = "runa", **kwargs) -> bool:
+        """Update specific fields of a memory.
+
+        Args:
+            memory_id: ID of the memory to update.
+            source: Origin of the action (audit trail).
+            user_id: User namespace for the audit entry.
+            **kwargs: Fields to update (content, category, tags, importance, emotional_valence).
+        """
         allowed_fields = {'content', 'category', 'tags', 'importance', 'emotional_valence'}
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
         if not updates:
@@ -229,18 +343,57 @@ class RunaMemory:
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [memory_id]
 
+        # Compute content hash for audit before the update
+        content_hash = hashlib.sha256(
+            (updates.get("content") or str(memory_id)).encode()
+        ).hexdigest()[:16]
+
         def _update(conn):
             conn.execute(f"UPDATE memories SET {set_clause} WHERE id = ?", values)
             return True
-        return self._write(_update)
+        result = self._write(_update)
 
-    def delete_memory(self, memory_id: int) -> bool:
-        """Delete a memory by ID (also removes access log entries)."""
+        # T7-2: Audit trail — log the update action
+        if result:
+            self.audit.log(
+                memory_id=memory_id,
+                action=AuditAction.UPDATE,
+                source=source,
+                content_hash=content_hash,
+                user_id=user_id,
+                metadata={"updated_fields": list(updates.keys())},
+            )
+        return result
+
+    def delete_memory(self, memory_id: int, source: str = "unknown",
+                     user_id: str = "runa") -> bool:
+        """Delete a memory by ID (also removes access log entries).
+
+        Args:
+            memory_id: ID of the memory to delete.
+            source: Origin of the action (audit trail).
+            user_id: User namespace for the audit entry.
+        """
+
+        # T7-2: Audit trail — log the delete action (hash of the ID since content is gone)
+        content_hash = hashlib.sha256(str(memory_id).encode()).hexdigest()[:16]
+
         def _delete(conn):
             conn.execute("DELETE FROM memory_access_log WHERE memory_id = ?", (memory_id,))
             conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             return True
-        return self._write(_delete)
+        result = self._write(_delete)
+
+        # Log delete after successful removal
+        if result:
+            self.audit.log(
+                memory_id=memory_id,
+                action=AuditAction.DELETE,
+                source=source,
+                content_hash=content_hash,
+                metadata={"action": "delete", "user_id": user_id},
+            )
+        return result
 
     # ─── CRUD: Saga Events ───────────────────────────────────────────────
 
@@ -465,6 +618,182 @@ class RunaMemory:
         params.append(limit)
         cursor.execute(query, params)
         return [dict(row) for row in cursor.fetchall()]
+
+    # ── T5-2: Temporal Validity ────────────────────────────────────────────
+
+    def store_with_validity(
+        self,
+        content: str,
+        category: str = "general",
+        tags: Optional[Any] = None,
+        importance: int = 5,
+        emotional_valence: float = 0.0,
+        valid_from: Optional[str] = None,
+        valid_until: Optional[str] = None,
+    ) -> int:
+        """Store a memory with a temporal validity window.
+
+        Facts that are only true within a time range (e.g. "staying at
+        Hotel X until Friday") get valid_from/valid_until. Facts without
+        an expiry are NULL in both columns (always valid).
+
+        Args:
+            content: The memory content to store.
+            category: Category label.
+            tags: Tags as string or list.
+            importance: 1-10 (default 5).
+            emotional_valence: -1.0 to 1.0.
+            valid_from: ISO datetime string — fact becomes true at this time.
+            valid_until: ISO datetime string — fact expires after this time.
+
+        Returns:
+            The ID of the new memory.
+        """
+        memory_id = self.add_memory(
+            content=content,
+            category=category,
+            tags=tags,
+            importance=importance,
+            emotional_valence=emotional_valence,
+        )
+        if memory_id < 0:
+            return memory_id  # Blocked by filter
+
+        def _update_validity(conn):
+            conn.execute(
+                "UPDATE memories SET valid_from=?, valid_until=? WHERE id=?",
+                (valid_from, valid_until, memory_id),
+            )
+        self._write(_update_validity)
+        return memory_id
+
+    def supersede(
+        self,
+        old_memory_id: int,
+        new_content: str,
+        category: Optional[str] = None,
+        importance: Optional[int] = None,
+        tags: Optional[Any] = None,
+        emotional_valence: Optional[float] = None,
+    ) -> int:
+        """Mark an old memory as superseded by a new one.
+
+        Use this when a preference or fact changes (e.g. "I'm vegetarian"
+        → "I eat fish now"). The old memory gets is_current=0 and a
+        superseded_by reference to the new memory. The new memory
+        inherits the old memory's category and importance if not provided.
+
+        Args:
+            old_memory_id: The memory to supersede.
+            new_content: The updated content.
+            category: Category for the new memory (inherits from old if None).
+            importance: Importance for the new memory (inherits from old if None).
+            tags: Tags (inherits from old if None).
+            emotional_valence: (inherits from old if None).
+
+        Returns:
+            The ID of the new (superseding) memory.
+        """
+        old = self.get_memory(old_memory_id)
+        if old is None:
+            logger.warning("Cannot supersede memory %d — not found.", old_memory_id)
+            return -1
+
+        # Inherit from old memory if not explicitly provided
+        _category = category or old.get("category", "general")
+        _importance = importance if importance is not None else old.get("importance", 5)
+        _tags = tags if tags is not None else old.get("tags")
+        _valence = emotional_valence if emotional_valence is not None else old.get("emotional_valence", 0.0)
+
+        new_id = self.add_memory(
+            content=new_content,
+            category=_category,
+            tags=_tags,
+            importance=_importance,
+            emotional_valence=_valence,
+        )
+
+        if new_id < 0:
+            return new_id  # Store blocked
+
+        # Mark old memory as superseded
+        def _mark_superseded(conn):
+            conn.execute(
+                "UPDATE memories SET is_current=0, superseded_by=? WHERE id=?",
+                (new_id, old_memory_id),
+            )
+        self._write(_mark_superseded)
+
+        logger.info(
+            "Memory %d superseded by %d: '%s' → '%s'",
+            old_memory_id, new_id,
+            old.get("content", "")[:40], new_content[:40],
+        )
+        return new_id
+
+    def recall_current(
+        self,
+        query: Optional[str] = None,
+        category: Optional[str] = None,
+        limit: int = 10,
+        min_importance: int = 5,
+        now: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> List[Dict]:
+        """Recall only currently-valid memories.
+
+        Filters out:
+        - Memories with is_current=0 (superseded)
+        - Memories whose valid_from is in the future
+        - Memories whose valid_until is in the past
+
+        Args:
+            query: Optional FTS5 search string.
+            category: Filter by category.
+            limit: Max results.
+            min_importance: Minimum importance threshold.
+            now: Override current time (ISO string). Defaults to UTC now.
+            user_id: Filter by user namespace (None = all users, 'runa' = Runa only).
+
+        Returns:
+            List of currently-valid memory dicts.
+        """
+        from datetime import datetime as _dt
+
+        if now is None:
+            now = _dt.utcnow().isoformat()
+
+        base_sql = """
+            SELECT * FROM memories
+            WHERE is_current = 1
+            AND (valid_from IS NULL OR valid_from <= ?)
+            AND (valid_until IS NULL OR valid_until >= ?)
+        """
+        params: list = [now, now]
+
+        if user_id is not None:
+            base_sql += " AND user_id = ?"
+            params.append(user_id)
+
+        if category:
+            base_sql += " AND category = ?"
+            params.append(category)
+
+        if min_importance > 1:
+            base_sql += " AND importance >= ?"
+            params.append(min_importance)
+
+        base_sql += " ORDER BY importance DESC, timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = self._get_conn().cursor()
+        cursor.execute(base_sql, params)
+        results = [dict(row) for row in cursor.fetchall()]
+
+        for m in results:
+            self._log_access(m["id"], "recall_current")
+
+        return results
 
     # ─── Access Logging ──────────────────────────────────────────────────
 

@@ -5,7 +5,7 @@ SQL CREATE statements, indexes, and FTS5 triggers for the memory database.
 """
 
 # Schema version for migration tracking
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 7
 
 SCHEMA_META_TABLE = """
 CREATE TABLE IF NOT EXISTS _schema_meta (
@@ -24,7 +24,13 @@ CREATE TABLE IF NOT EXISTS memories (
     content TEXT NOT NULL,
     tags JSON,
     importance INTEGER DEFAULT 5 CHECK(importance >= 1 AND importance <= 10),
-    emotional_valence REAL DEFAULT 0.0 CHECK(emotional_valence >= -1.0 AND emotional_valence <= 1.0)
+    emotional_valence REAL DEFAULT 0.0 CHECK(emotional_valence >= -1.0 AND emotional_valence <= 1.0),
+    valid_from TEXT DEFAULT NULL,
+    valid_until TEXT DEFAULT NULL,
+    superseded_by INTEGER DEFAULT NULL REFERENCES memories(id),
+    is_current INTEGER DEFAULT 1,
+    memory_type TEXT DEFAULT 'episodic',
+    user_id TEXT DEFAULT 'runa'
 )
 """
 
@@ -92,17 +98,54 @@ CREATE TABLE IF NOT EXISTS memory_access_log (
 )
 """
 
+# ── T6-1: Wyrd Graph Edge Table ────────────────────────────────────────────
+
+WYRD_EDGES_TABLE = """
+CREATE TABLE IF NOT EXISTS wyrd_edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_entity TEXT NOT NULL,
+    target_entity TEXT NOT NULL,
+    relationship_type TEXT NOT NULL,
+    strength REAL DEFAULT 1.0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    metadata TEXT DEFAULT '{}',
+    user_id TEXT DEFAULT 'runa',
+    UNIQUE(source_entity, target_entity, relationship_type, user_id)
+)
+"""
+
 # ─── Index creation statements ─────────────────────────────────────────────
 
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)",
     "CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance)",
     "CREATE INDEX IF NOT EXISTS idx_memories_valence ON memories(emotional_valence)",
+    # T5-2: Temporal validity indexes
+    "CREATE INDEX IF NOT EXISTS idx_memories_current ON memories(is_current, category, importance DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_validity ON memories(valid_from, valid_until)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by)",
+    # T5-3: Memory type + category index
+    "CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type, category)",
     "CREATE INDEX IF NOT EXISTS idx_saga_events_type ON saga_events(event_type)",
     "CREATE INDEX IF NOT EXISTS idx_saga_events_entity ON saga_events(entity_id)",
     "CREATE INDEX IF NOT EXISTS idx_knowledge_domain ON knowledge(domain)",
     "CREATE INDEX IF NOT EXISTS idx_access_log_memory ON memory_access_log(memory_id)",
     "CREATE INDEX IF NOT EXISTS idx_access_log_time ON memory_access_log(accessed_at)",
+    # T6-1: Wyrd Graph edge indexes
+    "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_source ON wyrd_edges(source_entity)",
+    "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_target ON wyrd_edges(target_entity)",
+    "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_type ON wyrd_edges(relationship_type)",
+    "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_strength ON wyrd_edges(strength)",
+    # T7-2: Audit trail indexes
+    "CREATE INDEX IF NOT EXISTS idx_audit_memory ON memory_audit(memory_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_source ON memory_audit(source)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_action ON memory_audit(action)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON memory_audit(timestamp)",
+    # T7-3: Per-user namespacing indexes
+    "CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id, category)",
+    "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_user ON wyrd_edges(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_user ON memory_audit(user_id)",
 ]
 
 # ─── FTS5 virtual tables ──────────────────────────────────────────────────
@@ -140,6 +183,28 @@ PRAGMAS = [
 
 # ─── All table SQL aggregated for convenience ──────────────────────────────
 
+# ── Memory Audit Trail (T7-2) ────────────────────────────────────────────
+
+MEMORY_AUDIT_TABLE = """
+CREATE TABLE IF NOT EXISTS memory_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    source TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    timestamp TEXT DEFAULT (datetime('now')),
+    metadata TEXT DEFAULT '{}',
+    user_id TEXT DEFAULT 'runa'
+);
+"""
+
+MEMORY_AUDIT_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_audit_memory ON memory_audit(memory_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_source ON memory_audit(source)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_action ON memory_audit(action)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON memory_audit(timestamp)",
+]
+
 ALL_TABLES = [
     SCHEMA_META_TABLE,
     MEMORIES_TABLE,
@@ -149,4 +214,6 @@ ALL_TABLES = [
     CONVERSATIONS_TABLE,
     KNOWLEDGE_TABLE,
     MEMORY_ACCESS_LOG_TABLE,
+    WYRD_EDGES_TABLE,
+    MEMORY_AUDIT_TABLE,
 ]

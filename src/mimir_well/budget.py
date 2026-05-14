@@ -157,7 +157,7 @@ class TokenBudget:
             "semantic": int(self.memory_allocation * self.semantic_ratio),
             "procedural": int(self.memory_allocation * self.procedural_ratio),
             "spatial": int(self.memory_allocation * self.spatial_ratio),
-            "hecedure": int(self.memory_allocation * self.heuristic_ratio),
+            "heuristic": int(self.memory_allocation * self.heuristic_ratio),
             "total_memory": self.memory_allocation,
         }
 
@@ -239,7 +239,7 @@ _TYPE_STRATEGIES = {
     "semantic": _semantic_strategy,
     "procedural": _procedural_strategy,
     "spatial": _default_strategy,
-    "hecedure": _implicit_strategy,
+    "heuristic": _implicit_strategy,
 }
 
 
@@ -294,7 +294,7 @@ class TokenBudgeter:
             candidates: List of memory dicts with at least 'content',
                 'importance', and optionally 'access_count' keys.
             channel: One of 'episodic', 'semantic', 'procedural',
-                'spatial', 'heuristic', or 'hecedure'.
+                'spatial', 'heuristic'.
             priority_order: If given, memories with these priorities are
                 included first regardless of channel budget. Defaults to
                 [REQUIRED, HIGH].
@@ -384,14 +384,14 @@ class TokenBudgeter:
             "semantic": [],
             "procedural": [],
             "spatial": [],
-            "hecedure": [],
+            "heuristic": [],
         }
 
         for memory in candidates:
             # T5-3: Use memory_type field when available
             mem_type = memory.get("memory_type")
             if mem_type and mem_type in ("episodic", "semantic", "procedural", "implicit"):
-                channel_name = "hecedure" if mem_type == "implicit" else mem_type
+                channel_name = "heuristic" if mem_type == "implicit" else mem_type
             else:
                 category = memory.get("category", "general")
                 channel_enum = infer_channel(category)
@@ -441,7 +441,7 @@ class TokenBudgeter:
             "semantic": "📚 Knowledge & Facts",
             "procedural": "🔧 Patterns & Skills",
             "spatial": "🗺️ Location & Spatial Context",
-            "hecedure": "💡 Associations & Intuition",
+            "heuristic": "💡 Associations & Intuition",
         }
 
         sections: List[str] = []

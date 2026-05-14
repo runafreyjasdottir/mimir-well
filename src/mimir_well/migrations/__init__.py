@@ -230,3 +230,32 @@ register_migration(
     down_sql=MIGRATION_007_DOWN,
     description="Add user_id column to memories, wyrd_edges, and memory_audit for multi-tenant namespacing",
 )
+
+# ── Migration 008: Performance Indexes ────────────────────────────────────
+
+MIGRATION_008_UP = """
+-- Composite index for decay() N+1 fix: JOIN on memory_id + MAX(accessed_at)
+CREATE INDEX IF NOT EXISTS idx_access_log_memory_time
+    ON memory_access_log(memory_id, accessed_at DESC);
+
+-- Covering index for decay reinforcement: recent access by time
+CREATE INDEX IF NOT EXISTS idx_access_log_recent
+    ON memory_access_log(accessed_at DESC, memory_id);
+
+-- Index for temporal validity queries
+CREATE INDEX IF NOT EXISTS idx_memories_temporal
+    ON memories(valid_from, valid_until, is_current);
+"""
+
+MIGRATION_008_DOWN = """
+DROP INDEX IF EXISTS idx_memories_temporal;
+DROP INDEX IF NOT EXISTS idx_access_log_recent;
+DROP INDEX IF NOT EXISTS idx_access_log_memory_time;
+"""
+
+register_migration(
+    version=8,
+    up_sql=MIGRATION_008_UP,
+    down_sql=MIGRATION_008_DOWN,
+    description="Performance indexes for decay JOIN, recent access, and temporal validity queries",
+)

@@ -919,7 +919,8 @@ class RunaMemory:
 
     # ─── Ebbinghaus Decay ─────────────────────────────────────────────────
 
-    def decay(self, half_life_days: float = 30.0, min_importance: int = 1) -> Dict[str, int]:
+    def decay(self, half_life_days: float = 30.0, min_importance: int = 1,
+             user_id: Optional[str] = None) -> Dict[str, int]:
         """Apply Ebbinghaus forgetting curve to memory importance.
 
         Memories decay over time unless reinforced. The half-life determines
@@ -928,6 +929,7 @@ class RunaMemory:
         Args:
             half_life_days: Days for importance to halve (default 30)
             min_importance: Below this threshold, memories are prunable
+            user_id: Filter by user namespace (None = all users).
 
         Returns:
             Dict with 'decayed', 'pruned', 'reinforced' counts
@@ -939,7 +941,37 @@ class RunaMemory:
         pruned = 0
         reinforced = 0
 
-        cursor = conn.execute("SELECT id, importance, timestamp FROM memories")
+        # N+1 fix: JOIN memories with access log in a single query
+        # instead of per-row SELECT MAX(accessed_at)
+        if user_id:
+            cursor = conn.execute(
+                """
+                SELECT m.id, m.importance, m.timestamp,
+                       COALESCE(a.last_access, m.timestamp) AS last_accessed
+                FROM memories m
+                LEFT JOIN (
+                    SELECT memory_id, MAX(accessed_at) AS last_access
+                    FROM memory_access_log
+                    GROUP BY memory_id
+                ) a ON m.id = a.memory_id
+                WHERE m.is_current = 1 AND m.user_id = ?
+                """,
+                (user_id,),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                SELECT m.id, m.importance, m.timestamp,
+                       COALESCE(a.last_access, m.timestamp) AS last_accessed
+                FROM memories m
+                LEFT JOIN (
+                    SELECT memory_id, MAX(accessed_at) AS last_access
+                    FROM memory_access_log
+                    GROUP BY memory_id
+                ) a ON m.id = a.memory_id
+                WHERE m.is_current = 1
+                """,
+            )
         rows = cursor.fetchall()
 
         for row in rows:
@@ -949,13 +981,8 @@ class RunaMemory:
             except (ValueError, TypeError):
                 timestamp = now
 
-            # Get last access time
-            last_accessed_row = conn.execute(
-                "SELECT MAX(accessed_at) FROM memory_access_log WHERE memory_id = ?",
-                (mem_id,)
-            ).fetchone()
-            last_accessed_str = last_accessed_row[0] if last_accessed_row and last_accessed_row[0] else timestamp_str
-
+            # Use pre-joined last_accessed instead of N+1 query
+            last_accessed_str = row["last_accessed"]
             try:
                 last_accessed = datetime.fromisoformat(last_accessed_str) if last_accessed_str else timestamp
             except (ValueError, TypeError):
@@ -973,18 +1000,34 @@ class RunaMemory:
                             (max(1, min(10, round(new_importance))), mem_id))
                 decayed += 1
 
-        # Reinforce recently accessed memories
+        # Reinforce recently accessed memories (single UPDATE, no N+1)
         yesterday = (now - timedelta(hours=24)).isoformat()
-        recent = conn.execute(
-            "SELECT DISTINCT mal.memory_id FROM memory_access_log mal "
-            "WHERE mal.accessed_at > ?", (yesterday,)
-        ).fetchall()
-        for (mem_id,) in recent:
-            current = conn.execute("SELECT importance FROM memories WHERE id = ?", (mem_id,)).fetchone()
-            if current and current[0] < 10:
-                conn.execute("UPDATE memories SET importance = MIN(?, 10) WHERE id = ?",
-                            (current[0] + 0.5, mem_id))
-                reinforced += 1
+        if user_id:
+            reinforced = conn.execute(
+                """
+                UPDATE memories SET importance = MIN(importance + 0.5, 10)
+                WHERE id IN (
+                    SELECT DISTINCT mal.memory_id
+                    FROM memory_access_log mal
+                    JOIN memories m ON m.id = mal.memory_id
+                    WHERE mal.accessed_at > ? AND m.importance < 10 AND m.user_id = ?
+                )
+                """,
+                (yesterday, user_id),
+            ).rowcount
+        else:
+            reinforced = conn.execute(
+                """
+                UPDATE memories SET importance = MIN(importance + 0.5, 10)
+                WHERE id IN (
+                    SELECT DISTINCT mal.memory_id
+                    FROM memory_access_log mal
+                    JOIN memories m ON m.id = mal.memory_id
+                    WHERE mal.accessed_at > ? AND m.importance < 10
+                )
+                """,
+                (yesterday,),
+            ).rowcount
 
         self._commit()
         return {"decayed": decayed, "pruned": pruned, "reinforced": reinforced}

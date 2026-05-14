@@ -146,6 +146,10 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id, category)",
     "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_user ON wyrd_edges(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_audit_user ON memory_audit(user_id)",
+    # T8-4: Performance indexes for decay JOIN and temporal validity
+    "CREATE INDEX IF NOT EXISTS idx_access_log_memory_time ON memory_access_log(memory_id, accessed_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_access_log_recent ON memory_access_log(accessed_at DESC, memory_id)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_temporal ON memories(valid_from, valid_until, is_current)",
 ]
 
 # ─── FTS5 virtual tables ──────────────────────────────────────────────────

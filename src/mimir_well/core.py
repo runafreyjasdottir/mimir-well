@@ -639,11 +639,13 @@ class RunaMemory:
         emotional_valence: float = 0.0,
         valid_from: Optional[str] = None,
         valid_until: Optional[str] = None,
+        user_id: str = "runa",
+        source: str = "temporal",
     ) -> int:
         """Store a memory with a temporal validity window.
 
-        Facts that are only true within a time range (e.g. "staying at
-        Hotel X until Friday") get valid_from/valid_until. Facts without
+        Facts that are only true within a time range (e.g. \"staying at
+        Hotel X until Friday\") get valid_from/valid_until. Facts without
         an expiry are NULL in both columns (always valid).
 
         Args:
@@ -654,6 +656,8 @@ class RunaMemory:
             emotional_valence: -1.0 to 1.0.
             valid_from: ISO datetime string — fact becomes true at this time.
             valid_until: ISO datetime string — fact expires after this time.
+            user_id: User namespace (default 'runa').
+            source: Source label for audit trail.
 
         Returns:
             The ID of the new memory.
@@ -664,14 +668,16 @@ class RunaMemory:
             tags=tags,
             importance=importance,
             emotional_valence=emotional_valence,
+            user_id=user_id,
+            source=source,
         )
         if memory_id < 0:
             return memory_id  # Blocked by filter
 
         def _update_validity(conn):
             conn.execute(
-                "UPDATE memories SET valid_from=?, valid_until=? WHERE id=?",
-                (valid_from, valid_until, memory_id),
+                "UPDATE memories SET valid_from=?, valid_until=? WHERE id=? AND user_id=?",
+                (valid_from, valid_until, memory_id, user_id),
             )
         self._write(_update_validity)
         return memory_id

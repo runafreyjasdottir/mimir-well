@@ -240,6 +240,7 @@ def github_backup(db_path: Path, conn: sqlite3.Connection,
 
     repo_url = repo_url or config.get("backup_repo", "")
     if not repo_url:
+        logger.warning("github_backup: No repo URL configured — skipping push")
         return {"exported": False, "pushed": False, "error": "No repo URL configured"}
 
     # Export to JSON (sanitized)
@@ -315,16 +316,9 @@ def github_backup(db_path: Path, conn: sqlite3.Connection,
 
 
 def _validate_backup_file(backup: Path) -> bool:
-    """Validate a backup SQLite file's integrity."""
-    try:
-        test_conn = sqlite3.connect(str(backup))
-        row = test_conn.execute("PRAGMA integrity_check").fetchone()
-        test_conn.close()
-        if row and row[0] == "ok":
-            return True
-        logger.error("Backup integrity check failed: %s",
-                     row[0] if row else "unknown")
-        return False
-    except sqlite3.DatabaseError as e:
-        logger.error("Cannot read backup: %s", e)
-        return False
+    """Validate a backup SQLite file's integrity.
+
+    Delegates to repair.validate_backup() for consistent validation logic.
+    """
+    from mimir_well.repair import validate_backup
+    return validate_backup(str(backup))

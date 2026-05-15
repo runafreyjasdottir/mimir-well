@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from mimir_well.schema import (
-    ALL_TABLES, FTS_TABLES, FTS_TRIGGERS, INDEXES, PRAGMAS, SCHEMA_VERSION
+    ALL_TABLES, FTS_TABLES, INDEXES, PRAGMAS, SCHEMA_VERSION
 )
 from mimir_well.config import MimirConfig
 from mimir_well.guard import MemoryGuard, GuardResult, GuardSeverity
@@ -182,12 +182,6 @@ class RunaMemory:
                 cursor.execute(f"INSERT INTO {fts_name}({fts_name}) VALUES('rebuild')")
             except sqlite3.OperationalError:
                 pass  # Table doesn't exist yet or no data
-
-        for trigger_sql in FTS_TRIGGERS:
-            try:
-                cursor.execute(trigger_sql)
-            except sqlite3.OperationalError:
-                pass  # Trigger already exists
 
         # Track schema version
         cursor.execute(
@@ -1398,8 +1392,21 @@ class RunaMemory:
         return _backup_with_rotation(self._get_conn(), self.db_path, backup_dir, max_backups)
 
     def restore_from(self, backup_path: str) -> bool:
-        """Restore the database from a backup file."""
-        return restore_from_backup(self.db_path, backup_path)
+        """Restore the database from a backup file.
+
+        After restoration, the thread-local connection is reset so that
+        _get_conn() creates a fresh connection to the restored database.
+        """
+        result = restore_from_backup(self.db_path, backup_path)
+        # Reset thread-local connection to avoid stale references
+        conn = getattr(self._local, 'conn', None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
+        return result
 
     def github_backup(self, repo_url: Optional[str] = None, branch: str = "main",
                        commit_msg: str = "auto: Mímir's Well backup",

@@ -172,8 +172,6 @@ FTS_TABLES = [
 # ─── FTS sync ──────────────────────────────────────────────────────────────
 # With content=external mode, FTS5 auto-syncs on INSERT, UPDATE, and DELETE.
 # No triggers are needed — SQLite handles it all internally.
-FTS_TRIGGERS = []
-
 # ─── SQLite PRAGMAs ────────────────────────────────────────────────────────
 
 PRAGMAS = [

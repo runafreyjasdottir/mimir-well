@@ -49,9 +49,9 @@ def test_supersede_cross_user_blocked():
         new_id = mem.supersede(old_id, "Volmarr trying to supersede", user_id="volmarr")
 
         # Cross-user supersede fails — get_memory filters by user_id
-        # so volmarr can't see runa's memory, supersede returns -1
-        assert new_id == -1, (
-            f"Cross-user supersede should return -1, got {new_id}"
+        # so volmarr can't see runa's memory, supersede returns None
+        assert new_id is None, (
+            f"Cross-user supersede should return None, got {new_id}"
         )
 
         # The original memory should remain untouched

@@ -281,7 +281,7 @@ class WyrdGraph:
             rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
-                       strength, metadata, created_at, updated_at
+                       strength, metadata, created_at, updated_at, user_id
                 FROM wyrd_edges
                 WHERE source_entity = ? AND relationship_type = ? AND user_id = ?
                 ORDER BY strength DESC
@@ -292,7 +292,7 @@ class WyrdGraph:
             rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
-                       strength, metadata, created_at, updated_at
+                       strength, metadata, created_at, updated_at, user_id
                 FROM wyrd_edges
                 WHERE source_entity = ? AND relationship_type = ?
                 ORDER BY strength DESC
@@ -303,7 +303,7 @@ class WyrdGraph:
             rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
-                       strength, metadata, created_at, updated_at
+                       strength, metadata, created_at, updated_at, user_id
                 FROM wyrd_edges
                 WHERE source_entity = ? AND user_id = ?
                 ORDER BY strength DESC
@@ -314,7 +314,7 @@ class WyrdGraph:
             rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
-                       strength, metadata, created_at, updated_at
+                       strength, metadata, created_at, updated_at, user_id
                 FROM wyrd_edges
                 WHERE source_entity = ?
                 ORDER BY strength DESC
@@ -325,13 +325,14 @@ class WyrdGraph:
         return [
             {
                 "id": r["id"],
-                "source": r["source_entity"],
-                "target": r["target_entity"],
+                "source_entity": r["source_entity"],
+                "target_entity": r["target_entity"],
                 "relationship_type": r["relationship_type"],
                 "strength": r["strength"],
                 "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
                 "created_at": r["created_at"],
                 "updated_at": r["updated_at"],
+                "user_id": r["user_id"],
             }
             for r in rows
         ]
@@ -352,7 +353,7 @@ class WyrdGraph:
             rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
-                       strength, metadata, created_at, updated_at
+                       strength, metadata, created_at, updated_at, user_id
                 FROM wyrd_edges
                 WHERE target_entity = ? AND relationship_type = ? AND user_id = ?
                 ORDER BY strength DESC
@@ -363,7 +364,7 @@ class WyrdGraph:
             rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
-                       strength, metadata, created_at, updated_at
+                       strength, metadata, created_at, updated_at, user_id
                 FROM wyrd_edges
                 WHERE target_entity = ? AND relationship_type = ?
                 ORDER BY strength DESC
@@ -374,7 +375,7 @@ class WyrdGraph:
             rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
-                       strength, metadata, created_at, updated_at
+                       strength, metadata, created_at, updated_at, user_id
                 FROM wyrd_edges
                 WHERE target_entity = ? AND user_id = ?
                 ORDER BY strength DESC
@@ -385,7 +386,7 @@ class WyrdGraph:
             rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
-                       strength, metadata, created_at, updated_at
+                       strength, metadata, created_at, updated_at, user_id
                 FROM wyrd_edges
                 WHERE target_entity = ?
                 ORDER BY strength DESC
@@ -396,13 +397,14 @@ class WyrdGraph:
         return [
             {
                 "id": r["id"],
-                "source": r["source_entity"],
-                "target": r["target_entity"],
+                "source_entity": r["source_entity"],
+                "target_entity": r["target_entity"],
                 "relationship_type": r["relationship_type"],
                 "strength": r["strength"],
                 "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
                 "created_at": r["created_at"],
                 "updated_at": r["updated_at"],
+                "user_id": r["user_id"],
             }
             for r in rows
         ]
@@ -645,16 +647,28 @@ class WyrdGraph:
                 total_facts += 1
                 try:
                     entities = json.loads(row["entities"]) if row["entities"] else []
+                    # Extract relationship type from content or tags, not category
+                    # (category is always 'relationship' due to WHERE filter)
+                    content = row["content"] or ""
+                    tags_str = row["tags"] or ""
+                    rel_type = tags_str.split(",")[0].strip() if tags_str else "related_to"
+                    # Fallback: try to extract verb from content (e.g., "X is partner of Y")
+                    if content and " is " in content and " of " in content:
+                        parts = content.split(" is ")
+                        if len(parts) >= 2:
+                            verb_phrase = parts[1].split(" of ")[0].strip()
+                            if verb_phrase:
+                                rel_type = verb_phrase.replace(" ", "_")
                     if len(entities) >= 2:
                         self.add_edge(
                             source=entities[0],
                             target=entities[1],
-                            relationship_type=row["category"],
+                            relationship_type=rel_type,
                             strength=1.0,
                             metadata={
                                 "source": "fact_store_migration",
-                                "content": row["content"],
-                                "tags": row["tags"] if row["tags"] else "",
+                                "content": content,
+                                "tags": tags_str,
                             },
                         )
                         edges_created += 1
@@ -678,4 +692,5 @@ class WyrdGraph:
             "edges_created": edges_created,
             "edges_skipped": edges_skipped,
             "total_facts": total_facts,
+            "error": None,
         }

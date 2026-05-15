@@ -78,7 +78,7 @@ def test_get_memory_nonexistent_id_returns_none():
 
 
 def test_supersede_uses_user_id_for_get_memory():
-    """supersede should use get_memory with user_id — cross-user supersede returns -1."""
+    """supersede should use get_memory with user_id — cross-user supersede returns None."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
     try:
@@ -89,8 +89,8 @@ def test_supersede_uses_user_id_for_get_memory():
         # Try to supersede volmarr's memory as runa
         result = mem.supersede(volmarr_id, "Runa trying to supersede", user_id="runa")
 
-        # Should return -1 because get_memory filters by user_id
-        assert result == -1, f"Cross-user supersede should return -1, got {result}"
+        # Should return None because get_memory filters by user_id
+        assert result is None, f"Cross-user supersede should return None, got {result}"
 
     finally:
         os.unlink(db_path)

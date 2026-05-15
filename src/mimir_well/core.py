@@ -11,7 +11,6 @@ knowledge promotion.
 import json
 import hashlib
 import logging
-import os
 import re
 import sqlite3
 import threading
@@ -183,11 +182,15 @@ class RunaMemory:
             except sqlite3.OperationalError:
                 pass  # Table doesn't exist yet or no data
 
-        # Track schema version
-        cursor.execute(
-            "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES (?, ?)",
-            ("schema_version", str(SCHEMA_VERSION)),
-        )
+        # Track schema version — only on first init, not every startup
+        existing_version = cursor.execute(
+            "SELECT value FROM _schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if existing_version is None or int(existing_version[0]) != SCHEMA_VERSION:
+            cursor.execute(
+                "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES (?, ?)",
+                ("schema_version", str(SCHEMA_VERSION)),
+            )
 
         conn.commit()
 
@@ -198,7 +201,7 @@ class RunaMemory:
                    emotional_valence: float = 0.0,
                    memory_type: Optional[str] = None,
                    source: str = "mimir",
-                   user_id: str = "runa") -> int:
+                   user_id: str = "runa") -> Optional[int]:
         """Store a new memory.
 
         Args:
@@ -233,7 +236,7 @@ class RunaMemory:
                 "Memory write BLOCKED by Guard: %s (content: %.50s...)",
                 guard_result.reason, content[:50],
             )
-            return -1
+            return None
         # Use sanitized content if available
         if guard_result.sanitized_content:
             content = guard_result.sanitized_content
@@ -783,7 +786,7 @@ class RunaMemory:
         emotional_valence: Optional[float] = None,
         user_id: str = "runa",
         source: str = "supersede",
-    ) -> int:
+    ) -> Optional[int]:
         """Mark an old memory as superseded by a new one.
 
         Use this when a preference or fact changes (e.g. "I'm vegetarian"
@@ -811,7 +814,7 @@ class RunaMemory:
                 "Cannot supersede memory %d — not found or not owned by user '%s'.",
                 old_memory_id, user_id,
             )
-            return -1
+            return None
 
         # Inherit from old memory if not explicitly provided
         _category = category or old.get("category", "general")
@@ -1471,6 +1474,8 @@ class RunaMemory:
             result["issues"].append(f"Query failed: {e}")
 
         try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
             cursor.execute("PRAGMA quick_check")
             integrity = cursor.fetchone()[0]
             if integrity != "ok":
@@ -1490,8 +1495,11 @@ class RunaMemory:
         cursor = self._get_conn().cursor()
         stats = {}
 
-        for table in ["memories", "entities", "relationships", "knowledge",
-                       "saga_events", "conversations", "memory_access_log"]:
+        VALID_STAT_TABLES = frozenset({
+            "memories", "entities", "relationships", "knowledge",
+            "saga_events", "conversations", "memory_access_log",
+        })
+        for table in VALID_STAT_TABLES:
             try:
                 cursor.execute(f"SELECT COUNT(*) FROM {table}")
                 stats[table] = cursor.fetchone()[0]
@@ -1514,7 +1522,12 @@ class RunaMemory:
     # ─── Context Manager ─────────────────────────────────────────────────
 
     def close(self):
-        """Close the database connections (RunaMemory and AuditTrail)."""
+        """Close the database connections (RunaMemory and AuditTrail).
+
+        Note: Only closes the calling thread's connection. Other threads'
+        connections will be closed when they next call _get_conn() after
+        the object is garbage-collected, or when the process exits.
+        """
         # Close audit trail connection
         if hasattr(self, 'audit') and self.audit is not None:
             self.audit.close()

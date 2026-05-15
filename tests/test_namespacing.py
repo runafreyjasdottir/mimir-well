@@ -163,7 +163,7 @@ class TestWyrdGraphNamespacing:
 
         runa_edges = self.graph.get_edges_to("runa", user_id="runa")
         assert len(runa_edges) == 1
-        assert runa_edges[0]["source"] == "volmarr"
+        assert runa_edges[0]["source_entity"] == "volmarr"
 
 
 class TestAuditTrailNamespacing:

@@ -16,6 +16,7 @@ only the threads that matter for this moment in the weave.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -127,7 +128,6 @@ class ContextEngineer:
         entities = []
 
         # Simple heuristic: capitalized phrases that could be entity names
-        import re
         # Match 1-3 word capitalized phrases
         matches = re.findall(
             r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b',
@@ -222,8 +222,8 @@ class ContextEngineer:
                             result.graph_paths.append(outgoing)
                         for incoming in graph_context.get("incoming", [])[:3]:
                             result.graph_paths.append(incoming)
-                    except Exception:
-                        pass  # Graph lookups are best-effort
+                    except Exception as e:
+                        logger.debug("Graph path lookup failed (best-effort): %s", e)
 
             selected = self.budgeter.select_memories(
                 semantic_candidates, channel="semantic"

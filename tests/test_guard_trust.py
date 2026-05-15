@@ -152,7 +152,7 @@ print(f'✓ Test 17: Normal write succeeds (id={good_id})')
 
 # ── Test 18: Null bytes still blocked ───────────────────────────
 bad_id = mem.add_memory('normal\x00hidden', category='general', importance=5)
-assert bad_id == -1
+assert bad_id is None
 print('✓ Test 18: Null bytes blocked')
 
 # ── Test 19: HTML sanitized ──────────────────────────────────────

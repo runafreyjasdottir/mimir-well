@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mimir-well"
-version = "2.10.2"
+version = "2.10.3"
 description = "AI Memory Database with Ebbinghaus Decay and Self-Healing"
 readme = "README.md"
 license = "MIT"

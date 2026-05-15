@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.3] — 2026-05-15 — S9.3 Patch
+
+*Byrgishólmr vigilant — every gate watched, every thread held.*
+
+### Fixed
+- decay()/consolidate() converted from manual lock acquire/release to `with self._lock` (8.1/8.2)
+- WyrdGraph read methods now catch sqlite3.OperationalError and return safe defaults (4.2)
+- restore_from_backup() documents stale-conn risk (4.5)
+
+### Verified as Already Fixed
+- WyrdGraph thread safety via threading.local + _lock (8.3/6.1) — done in S9.2
+- CATEGORY_TYPE_MAP has single source of truth in core.py (10.1) — already resolved
+- FTS_TRIGGERS dead code (2.1) — already removed
+
 ## [2.10.2] — 2026-05-15 — S9.2 Patch + Coverage
 
 *Byrgishólmr hardened — walls tested, gates reinforced.*

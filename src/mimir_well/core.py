@@ -108,7 +108,7 @@ class RunaMemory:
 
         # Thread-local storage for connections
         self._local = threading.local()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # T7-1: Memory Guard for injection protection
         self.guard = MemoryGuard()
@@ -132,9 +132,7 @@ class RunaMemory:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             for pragma in PRAGMAS:
-                if "WAL" in pragma:
-                    cursor.execute(pragma)
-            conn.execute("PRAGMA foreign_keys = ON")
+                cursor.execute(pragma)
             self._local.conn = conn
         return conn
 
@@ -154,9 +152,10 @@ class RunaMemory:
             return result
 
     def _commit(self):
-        """Explicitly commit the current transaction."""
-        conn = self._get_conn()
-        conn.commit()
+        """Explicitly commit the current transaction (thread-safe)."""
+        with self._lock:
+            conn = self._get_conn()
+            conn.commit()
 
     # ─── Schema Initialization ───────────────────────────────────────────
 
@@ -938,6 +937,15 @@ class RunaMemory:
         Returns:
             Dict with 'decayed', 'pruned', 'reinforced' counts
         """
+        self._lock.acquire()
+        try:
+            return self._decay_inner(half_life_days, min_importance, user_id)
+        finally:
+            self._lock.release()
+
+    def _decay_inner(self, half_life_days: float, min_importance: int,
+                     user_id: Optional[str]) -> Dict[str, int]:
+        """Inner decay implementation — called with lock held."""
         decay_factor = 0.5 ** (1.0 / half_life_days)
         conn = self._get_conn()
         now = datetime.now()
@@ -1052,6 +1060,14 @@ class RunaMemory:
         Returns:
             Dict with counts: {"decayed": N, "promoted": N, "pruned": N}
         """
+        self._lock.acquire()
+        try:
+            return self._consolidate_inner(user_id)
+        finally:
+            self._lock.release()
+
+    def _consolidate_inner(self, user_id: Optional[str] = None) -> Dict[str, int]:
+        """Inner consolidate implementation — called with lock held."""
         report = {"decayed": 0, "promoted": 0, "pruned": 0}
         conn = self._get_conn()
         cursor = conn.cursor()

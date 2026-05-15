@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 from collections import deque
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -40,14 +41,13 @@ class WyrdGraph:
         Args:
             db_path: Path to the SQLite database file.
         """
-        self._db = sqlite3.connect(db_path)
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA busy_timeout=5000")
-        self._db.execute("PRAGMA foreign_keys=ON")
-        self._db.row_factory = sqlite3.Row
+        self.db_path = db_path
+        self._local = threading.local()
+        self._lock = threading.RLock()
 
-        # Ensure the table exists (idempotent)
-        self._db.execute("""
+        # Initialize schema via a fresh connection
+        conn = self._get_conn()
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS wyrd_edges (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_entity TEXT NOT NULL,
@@ -63,7 +63,7 @@ class WyrdGraph:
         """)
         # Add user_id column if upgrading from older schema
         try:
-            self._db.execute("ALTER TABLE wyrd_edges ADD COLUMN user_id TEXT DEFAULT 'runa'")
+            conn.execute("ALTER TABLE wyrd_edges ADD COLUMN user_id TEXT DEFAULT 'runa'")
         except sqlite3.OperationalError:
             pass  # Column already exists
         # Ensure indexes exist
@@ -74,12 +74,52 @@ class WyrdGraph:
             "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_strength ON wyrd_edges(strength)",
             "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_user ON wyrd_edges(user_id)",
         ]:
-            self._db.execute(idx_sql)
-        self._db.commit()
+            conn.execute(idx_sql)
+        conn.commit()
+
+    # ─── Connection Management ────────────────────────────────────────────
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Get a thread-local database connection with row factory."""
+        conn = getattr(self._local, 'conn', None)
+        if conn is None:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout = 10000")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.row_factory = sqlite3.Row
+            self._local.conn = conn
+        return conn
+
+    def _write(self, fn):
+        """Execute a write operation with thread-safe commit.
+
+        Args:
+            fn: Callable that takes a connection and performs the write.
+
+        Returns:
+            The return value of fn.
+        """
+        with self._lock:
+            conn = self._get_conn()
+            result = fn(conn)
+            conn.commit()
+            return result
+
+    def _commit(self):
+        """Explicitly commit the current transaction."""
+        conn = self._get_conn()
+        conn.commit()
 
     def close(self):
-        """Close the database connection."""
-        self._db.close()
+        """Close the thread-local database connection."""
+        conn = getattr(self._local, 'conn', None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
 
     def __enter__(self):
         return self
@@ -116,19 +156,20 @@ class WyrdGraph:
             The row ID of the inserted/updated edge.
         """
         metadata_json = json.dumps(metadata or {})
-        cursor = self._db.execute(
-            """
-            INSERT INTO wyrd_edges (source_entity, target_entity, relationship_type, strength, metadata, user_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_entity, target_entity, relationship_type, user_id)
-            DO UPDATE SET strength=excluded.strength,
-                          metadata=excluded.metadata,
-                          updated_at=datetime('now')
-            """,
-            (source, target, relationship_type, strength, metadata_json, user_id),
-        )
-        self._db.commit()
-        return cursor.lastrowid
+        def _insert(conn):
+            cursor = conn.execute(
+                """
+                INSERT INTO wyrd_edges (source_entity, target_entity, relationship_type, strength, metadata, user_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_entity, target_entity, relationship_type, user_id)
+                DO UPDATE SET strength=excluded.strength,
+                              metadata=excluded.metadata,
+                              updated_at=datetime('now')
+                """,
+                (source, target, relationship_type, strength, metadata_json, user_id),
+            )
+            return cursor.lastrowid
+        return self._write(_insert)
 
     def remove_edge(self, source: str, target: str, relationship_type: str,
                      user_id: Optional[str] = None) -> bool:
@@ -143,25 +184,26 @@ class WyrdGraph:
         Returns:
             True if an edge was removed, False if not found.
         """
-        if user_id:
-            cursor = self._db.execute(
-                """
-                DELETE FROM wyrd_edges
-                WHERE source_entity = ? AND target_entity = ?
-                      AND relationship_type = ? AND user_id = ?
-                """,
-                (source, target, relationship_type, user_id),
-            )
-        else:
-            cursor = self._db.execute(
-                """
-                DELETE FROM wyrd_edges
-                WHERE source_entity = ? AND target_entity = ? AND relationship_type = ?
-                """,
-                (source, target, relationship_type),
-            )
-        self._db.commit()
-        return cursor.rowcount > 0
+        def _delete(conn):
+            if user_id:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM wyrd_edges
+                    WHERE source_entity = ? AND target_entity = ?
+                          AND relationship_type = ? AND user_id = ?
+                    """,
+                    (source, target, relationship_type, user_id),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM wyrd_edges
+                    WHERE source_entity = ? AND target_entity = ? AND relationship_type = ?
+                    """,
+                    (source, target, relationship_type),
+                )
+            return cursor.rowcount > 0
+        return self._write(_delete)
 
     def get_edge(self, source: str, target: str, relationship_type: str,
                   user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -177,7 +219,7 @@ class WyrdGraph:
             Edge dict or None if not found.
         """
         if user_id:
-            row = self._db.execute(
+            row = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
                        strength, created_at, updated_at, metadata, user_id
@@ -188,7 +230,7 @@ class WyrdGraph:
                 (source, target, relationship_type, user_id),
             ).fetchone()
         else:
-            row = self._db.execute(
+            row = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
                        strength, created_at, updated_at, metadata, user_id
@@ -226,7 +268,7 @@ class WyrdGraph:
             List of edge dicts.
         """
         if relationship_type and user_id:
-            rows = self._db.execute(
+            rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
                        strength, metadata, created_at, updated_at
@@ -237,7 +279,7 @@ class WyrdGraph:
                 (entity, relationship_type, user_id),
             ).fetchall()
         elif relationship_type:
-            rows = self._db.execute(
+            rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
                        strength, metadata, created_at, updated_at
@@ -248,7 +290,7 @@ class WyrdGraph:
                 (entity, relationship_type),
             ).fetchall()
         elif user_id:
-            rows = self._db.execute(
+            rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
                        strength, metadata, created_at, updated_at
@@ -259,7 +301,7 @@ class WyrdGraph:
                 (entity, user_id),
             ).fetchall()
         else:
-            rows = self._db.execute(
+            rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
                        strength, metadata, created_at, updated_at
@@ -297,7 +339,7 @@ class WyrdGraph:
             List of edge dicts.
         """
         if relationship_type and user_id:
-            rows = self._db.execute(
+            rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
                        strength, metadata, created_at, updated_at
@@ -308,7 +350,7 @@ class WyrdGraph:
                 (entity, relationship_type, user_id),
             ).fetchall()
         elif relationship_type:
-            rows = self._db.execute(
+            rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
                        strength, metadata, created_at, updated_at
@@ -319,7 +361,7 @@ class WyrdGraph:
                 (entity, relationship_type),
             ).fetchall()
         elif user_id:
-            rows = self._db.execute(
+            rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
                        strength, metadata, created_at, updated_at
@@ -330,7 +372,7 @@ class WyrdGraph:
                 (entity, user_id),
             ).fetchall()
         else:
-            rows = self._db.execute(
+            rows = self._get_conn().execute(
                 """
                 SELECT id, source_entity, target_entity, relationship_type,
                        strength, metadata, created_at, updated_at
@@ -406,7 +448,7 @@ class WyrdGraph:
                 sql += " AND user_id = ?"
                 params.append(user_id)
 
-            for row in self._db.execute(sql, params).fetchall():
+            for row in self._get_conn().execute(sql, params).fetchall():
                 target = row["target_entity"]
                 rel_type = row["relationship_type"]
                 strength = row["strength"]
@@ -465,7 +507,7 @@ class WyrdGraph:
                 sql += " AND user_id = ?"
                 params.append(user_id)
 
-            for row in self._db.execute(sql, params).fetchall():
+            for row in self._get_conn().execute(sql, params).fetchall():
                 source = row["source_entity"]
                 rel_type = row["relationship_type"]
                 strength = row["strength"]
@@ -514,17 +556,17 @@ class WyrdGraph:
     def edge_count(self, user_id: Optional[str] = None) -> int:
         """Return total number of edges in the graph, optionally filtered by user."""
         if user_id:
-            row = self._db.execute(
+            row = self._get_conn().execute(
                 "SELECT COUNT(*) FROM wyrd_edges WHERE user_id = ?", (user_id,)
             ).fetchone()
         else:
-            row = self._db.execute("SELECT COUNT(*) FROM wyrd_edges").fetchone()
+            row = self._get_conn().execute("SELECT COUNT(*) FROM wyrd_edges").fetchone()
         return row[0] if row else 0
 
     def entity_count(self, user_id: Optional[str] = None) -> int:
         """Return number of distinct entities in the graph, optionally filtered by user."""
         if user_id:
-            row = self._db.execute(
+            row = self._get_conn().execute(
                 "SELECT COUNT(DISTINCT e) FROM ("
                 "  SELECT source_entity AS e FROM wyrd_edges WHERE user_id = ?"
                 "  UNION"
@@ -533,7 +575,7 @@ class WyrdGraph:
                 (user_id, user_id),
             ).fetchone()
         else:
-            row = self._db.execute(
+            row = self._get_conn().execute(
                 "SELECT COUNT(DISTINCT e) FROM ("
                 "  SELECT source_entity AS e FROM wyrd_edges "
                 "  UNION "
@@ -545,12 +587,12 @@ class WyrdGraph:
     def relationship_types(self, user_id: Optional[str] = None) -> List[str]:
         """Return all distinct relationship types in the graph, optionally filtered by user."""
         if user_id:
-            rows = self._db.execute(
+            rows = self._get_conn().execute(
                 "SELECT DISTINCT relationship_type FROM wyrd_edges WHERE user_id = ? ORDER BY relationship_type",
                 (user_id,),
             ).fetchall()
         else:
-            rows = self._db.execute(
+            rows = self._get_conn().execute(
                 "SELECT DISTINCT relationship_type FROM wyrd_edges ORDER BY relationship_type"
             ).fetchall()
         return [r[0] for r in rows]

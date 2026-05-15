@@ -99,6 +99,8 @@ register_migration(
 MIGRATION_004_UP = """
 -- Wyrd Graph: Directed edges between entities
 -- Enables multi-hop relationship traversal (BFS from any entity)
+-- Note: user_id column is added by migration 007, so we exclude it
+-- from the UNIQUE constraint here for upgrade compatibility.
 CREATE TABLE IF NOT EXISTS wyrd_edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_entity TEXT NOT NULL,
@@ -108,7 +110,7 @@ CREATE TABLE IF NOT EXISTS wyrd_edges (
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     metadata TEXT DEFAULT '{}',
-    UNIQUE(source_entity, target_entity, relationship_type, user_id)
+    UNIQUE(source_entity, target_entity, relationship_type)
 );
 
 -- Fast neighbor lookups
@@ -127,6 +129,9 @@ DROP INDEX IF EXISTS idx_wyrd_edges_source;
 DROP TABLE IF EXISTS wyrd_edges;
 """
 
+# Note: Variable name MIGRATION_004 but version=5 because migration 004
+# corresponds to schema version 5 (migrations advance the schema version
+# by the version number they register). This is intentional but confusing.
 register_migration(
     version=5,
     up_sql=MIGRATION_004_UP,

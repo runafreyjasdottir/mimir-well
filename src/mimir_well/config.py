@@ -57,12 +57,24 @@ class MimirConfig:
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning("Failed to load config from %s: %s", self._config_path, e)
         else:
-            # Create default config file
+            # Create default config file — use O_EXCL to avoid races
             self._config_path.parent.mkdir(parents=True, exist_ok=True)
+            import os
             try:
-                with open(self._config_path, "w") as f:
+                # O_EXCL | O_CREAT = atomic create-only, fails if file exists
+                fd = os.open(self._config_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                with os.fdopen(fd, "w") as f:
                     json.dump(self._data, f, indent=2)
                 logger.info("Created default config at %s", self._config_path)
+            except FileExistsError:
+                # Another process created it first — load instead
+                try:
+                    with open(self._config_path, "r") as f:
+                        user_config = json.load(f)
+                    self._data.update(user_config)
+                    logger.info("Config file appeared (race), loaded from %s", self._config_path)
+                except (json.JSONDecodeError, OSError):
+                    pass  # Corrupt or gone — use defaults
             except OSError as e:
                 logger.warning("Could not create default config: %s", e)
 

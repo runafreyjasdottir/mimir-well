@@ -47,35 +47,43 @@ class WyrdGraph:
 
         # Initialize schema via a fresh connection
         conn = self._get_conn()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS wyrd_edges (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_entity TEXT NOT NULL,
-                target_entity TEXT NOT NULL,
-                relationship_type TEXT NOT NULL,
-                strength REAL DEFAULT 1.0,
-                created_at TEXT DEFAULT (datetime('now')),
-                updated_at TEXT DEFAULT (datetime('now')),
-                metadata TEXT DEFAULT '{}',
-                user_id TEXT DEFAULT 'runa',
-                UNIQUE(source_entity, target_entity, relationship_type, user_id)
-            )
-        """)
-        # Add user_id column if upgrading from older schema
+        # Use a single transaction for atomic schema init
+        # This prevents partial schema states if the process crashes mid-init
         try:
-            conn.execute("ALTER TABLE wyrd_edges ADD COLUMN user_id TEXT DEFAULT 'runa'")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-        # Ensure indexes exist
-        for idx_sql in [
-            "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_source ON wyrd_edges(source_entity)",
-            "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_target ON wyrd_edges(target_entity)",
-            "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_type ON wyrd_edges(relationship_type)",
-            "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_strength ON wyrd_edges(strength)",
-            "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_user ON wyrd_edges(user_id)",
-        ]:
-            conn.execute(idx_sql)
-        conn.commit()
+            conn.execute("BEGIN")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS wyrd_edges (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_entity TEXT NOT NULL,
+                    target_entity TEXT NOT NULL,
+                    relationship_type TEXT NOT NULL,
+                    strength REAL DEFAULT 1.0,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    updated_at TEXT DEFAULT (datetime('now')),
+                    metadata TEXT DEFAULT '{}',
+                    user_id TEXT DEFAULT 'runa',
+                    UNIQUE(source_entity, target_entity, relationship_type, user_id)
+                )
+            """)
+            # Migration: add user_id column if upgrading from older schema
+            # This is a no-op on fresh DBs (user_id is already in CREATE TABLE)
+            try:
+                conn.execute("ALTER TABLE wyrd_edges ADD COLUMN user_id TEXT DEFAULT 'runa'")
+            except sqlite3.OperationalError:
+                pass  # Column already exists — expected on fresh DBs
+            # Ensure indexes exist
+            for idx_sql in [
+                "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_source ON wyrd_edges(source_entity)",
+                "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_target ON wyrd_edges(target_entity)",
+                "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_type ON wyrd_edges(relationship_type)",
+                "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_strength ON wyrd_edges(strength)",
+                "CREATE INDEX IF NOT EXISTS idx_wyrd_edges_user ON wyrd_edges(user_id)",
+            ]:
+                conn.execute(idx_sql)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     # ─── Connection Management ────────────────────────────────────────────
 

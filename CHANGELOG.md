@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.1] — 2026-05-15 — S9.1 Patch
+
+*Byrgishólmr reinforced — patching cracks the frost revealed.*
+
+### Fixed
+- `get_stats()` now uses frozen whitelist for table names (SQL injection defense, 3.4)
+- Unified edge dict keys: `source_entity`/`target_entity`/`user_id` across `get_edge`, `get_edges_from`, `get_edges_to` (3.5)
+- `merge_from_fact_store()` extracts relationship type from tags/content, not category field (3.6)
+- `merge_from_fact_store()` returns `error: None` on success for consistent dict shapes (5.4)
+- `health_check()` gets fresh cursor in second try block — no more stale cursor after query failure (3.7)
+- `add_memory()` and `supersede()` return `None` instead of `-1` sentinel, with `Optional[int]` type hints (5.1/5.3)
+- Bare `except Exception: pass` in context_engineer.py replaced with logged debug (4.4)
+- `SCHEMA_VERSION` only written to DB on first init or version change, not every startup (4.6)
+- `close()` docstring documents thread-local limitation (6.3)
+- `import os` moved from module to function scope in core.py (2.3)
+- `import re` moved to module scope in context_engineer.py (2.4)
+
+### Reclassified (NOT bugs)
+- f-string SQL in detect_contradictions/consolidate/get_stats: all use parameterized `?` with hardcoded SQL fragments (3.2/3.3/7.2)
+- `source` vs `user_id` parameter naming: intentional semantic distinction (10.3)
+
 ## [2.10.0] — 2026-05-15 — Byrgishólmr (Fortress Isle)
 
 *Sprint 9: Byrgishólmr — a fortress of iron and ice, where every wall is tested and every gate is secured.*

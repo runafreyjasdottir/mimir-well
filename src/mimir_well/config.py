@@ -46,7 +46,7 @@ class MimirConfig:
     def _default_config_path() -> Path:
         return Path.home() / ".mimir_well" / CONFIG_FILENAME
 
-    def _load(self):
+    def _load(self) -> None:
         """Load config from file, falling back to defaults."""
         if self._config_path.exists():
             try:
@@ -77,12 +77,12 @@ class MimirConfig:
         """Get a config value by key."""
         return self._data.get(key, default)
 
-    def set(self, key: str, value: Any):
+    def set(self, key: str, value: Any) -> None:
         """Set a config value and save to file."""
         self._data[key] = value
         self._save()
 
-    def _save(self):
+    def _save(self) -> None:
         """Persist config to file."""
         try:
             self._config_path.parent.mkdir(parents=True, exist_ok=True)

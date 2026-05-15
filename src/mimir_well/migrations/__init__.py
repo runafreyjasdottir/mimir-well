@@ -259,3 +259,42 @@ register_migration(
     down_sql=MIGRATION_008_DOWN,
     description="Performance indexes for decay JOIN, recent access, and temporal validity queries",
 )
+
+# ── Migration 009: T9-4 Composite Indexes ──────────────────────────────
+
+MIGRATION_009_UP = """
+-- WyrdGraph traversal: batch BFS queries filter by source_entity + relationship_type
+CREATE INDEX IF NOT EXISTS idx_wyrd_edges_source_type
+    ON wyrd_edges(source_entity, relationship_type, strength DESC);
+
+-- WyrdGraph reverse traversal: incoming edges by target
+CREATE INDEX IF NOT EXISTS idx_wyrd_edges_target
+    ON wyrd_edges(target_entity, strength DESC);
+
+-- promote_to_knowledge: batch check content uniqueness by category
+CREATE INDEX IF NOT EXISTS idx_knowledge_domain_content
+    ON knowledge(domain, content);
+
+-- detect_contradictions: LIKE queries with emotional valence filter
+CREATE INDEX IF NOT EXISTS idx_memories_valence
+    ON memories(emotional_valence, category, importance DESC);
+
+-- FTS content sync: fast joins on memory_id
+CREATE INDEX IF NOT EXISTS idx_saga_events_character
+    ON saga_events(character_id, timestamp DESC);
+"""
+
+MIGRATION_009_DOWN = """
+DROP INDEX IF EXISTS idx_saga_events_character;
+DROP INDEX IF EXISTS idx_memories_valence;
+DROP INDEX IF EXISTS idx_knowledge_domain_content;
+DROP INDEX IF EXISTS idx_wyrd_edges_target;
+DROP INDEX IF EXISTS idx_wyrd_edges_source_type;
+"""
+
+register_migration(
+    version=9,
+    up_sql=MIGRATION_009_UP,
+    down_sql=MIGRATION_009_DOWN,
+    description="T9-4: Composite indexes for WyrdGraph traversal, promotion, contradictions, and saga events",
+)

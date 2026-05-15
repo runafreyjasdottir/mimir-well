@@ -433,21 +433,22 @@ class WyrdGraph:
             List of dicts with: entity, distance, path, relationship, strength.
         """
         visited = {start}
-        queue = deque([(start, 0, [])])
+        # BFS using batch queries per level instead of per node (N+1 fix)
+        current_level = [(start, 0, [])]
         results = []
 
-        while queue:
-            current, depth, path = queue.popleft()
-            if depth >= max_depth:
-                continue
+        while current_level and current_level[0][1] < max_depth:
+            next_level = []
+            # Batch: fetch all edges for current level in one query
+            entities = [node for node, _, _ in current_level]
+            placeholders = ",".join("?" * len(entities))
 
-            # Get outgoing edges
-            sql = """
-                SELECT target_entity, relationship_type, strength
+            sql = f"""
+                SELECT source_entity, target_entity, relationship_type, strength
                 FROM wyrd_edges
-                WHERE source_entity = ?
+                WHERE source_entity IN ({placeholders})
             """
-            params: list = [current]
+            params: list = list(entities)
             if relationship_type:
                 sql += " AND relationship_type = ?"
                 params.append(relationship_type)
@@ -458,22 +459,31 @@ class WyrdGraph:
                 sql += " AND user_id = ?"
                 params.append(user_id)
 
+            # Build lookup: entity -> list of (source_entity, path) tuples
+            level_map = {node: path for node, _, path in current_level}
+            edge_map = {}  # source_entity -> [(target, rel_type, strength)]
             for row in self._get_conn().execute(sql, params).fetchall():
-                target = row["target_entity"]
-                rel_type = row["relationship_type"]
-                strength = row["strength"]
+                src = row["source_entity"]
+                edge_map.setdefault(src, []).append(
+                    (row["target_entity"], row["relationship_type"], row["strength"])
+                )
 
-                if target not in visited:
-                    visited.add(target)
-                    new_path = path + [(current, rel_type, target, strength)]
-                    results.append({
-                        "entity": target,
-                        "distance": depth + 1,
-                        "path": new_path,
-"relationship_type": rel_type,
-                        "strength": strength,
-                    })
-                    queue.append((target, depth + 1, new_path))
+            for node, depth, path in current_level:
+                edges = edge_map.get(node, [])
+                for target, rel_type, strength in edges:
+                    if target not in visited:
+                        visited.add(target)
+                        new_path = path + [(node, rel_type, target, strength)]
+                        results.append({
+                            "entity": target,
+                            "distance": depth + 1,
+                            "path": new_path,
+                            "relationship_type": rel_type,
+                            "strength": strength,
+                        })
+                        next_level.append((target, depth + 1, new_path))
+
+            current_level = next_level
 
         return results
 

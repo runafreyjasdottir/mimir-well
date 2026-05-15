@@ -1169,15 +1169,26 @@ class RunaMemory:
                 "WHERE importance >= ?", (min_importance,)
             )
 
-        for row in cursor.fetchall():
+        # Batch check: get all content already in knowledge to avoid N+1
+        rows = cursor.fetchall()
+        if not rows:
+            return {"promoted": 0, "skipped": 0}
+
+        contents = [row["content"] for row in rows]
+        placeholders = ",".join("?" * len(contents))
+        existing_set = {
+            row["content"] for row in conn.execute(
+                f"SELECT content FROM knowledge WHERE content IN ({placeholders})",
+                contents
+            ).fetchall()
+        }
+
+        for row in rows:
             mem_id, content, category, valence, timestamp_str = (
                 row["id"], row["content"], row["category"],
                 row["emotional_valence"], row["timestamp"]
             )
-            existing = conn.execute(
-                "SELECT id FROM knowledge WHERE content = ?", (content,)
-            ).fetchone()
-            if existing:
+            if content in existing_set:
                 skipped += 1
                 continue
 
@@ -1188,6 +1199,7 @@ class RunaMemory:
                 (category or "general", content, round(confidence, 2),
                  f"promoted_from_memory_{mem_id}", timestamp_str or datetime.now().isoformat())
             )
+            existing_set.add(content)  # Track newly inserted to avoid duplicates within batch
             promoted += 1
 
         self._commit()

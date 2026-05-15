@@ -7,7 +7,7 @@ contradiction detection, knowledge promotion, token budgeting, and temporal vali
 ᛗ í ᛗ í ᚱ — From the Well, all wisdom flows.
 """
 
-__version__ = "2.10.3"
+__version__ = "2.10.4"
 __author__ = "Eldrä Járnsdóttir"
 __description__ = "AI Memory Database with Ebbinghaus Decay, Self-Healing, Token Budgeting, and Temporal Validity"
 

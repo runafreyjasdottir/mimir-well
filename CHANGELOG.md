@@ -5,7 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.10.3] — 2026-05-15 — S9.3 Patch
+## [2.10.4] — 2026-05-15 — S9.4 Patch + Coverage
+
+*Byrgishólmr complete — every crack sealed, every blade tested.*
+
+### Fixed
+- Migration 004 UNIQUE constraint removed user_id (added by migration 007, not yet available) (3.8)
+- Migration 004 naming drift documented — variable name vs version number (2.2)
+
+### Resolved as Not Bugs
+- fts_search() SQL injection (3.1/7.1) — already whitelisted in S9.1
+- Backup validation duplication (10.2) — already delegates to repair.validate_backup()
+
+### Test Coverage Added
+- ContextEngineer: 29 tests (was 0) — entity extraction, multi-channel assembly, budget, graph paths
+- eye/app.py: 20 tests (was 0) — health, stats, search, dashboard tabs, query_db
+- decay.py: 24 edge case tests — zero/negative inputs, valence, thresholds, promotion limits
 
 *Byrgishólmr vigilant — every gate watched, every thread held.*
 

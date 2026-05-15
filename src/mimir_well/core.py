@@ -182,15 +182,34 @@ class RunaMemory:
             except sqlite3.OperationalError:
                 pass  # Table doesn't exist yet or no data
 
-        # Track schema version — only on first init, not every startup
-        existing_version = cursor.execute(
+        # ── Run pending migrations before stamping the version ──────────
+        # P0 fix: The migration runner existed but was never called from
+        # _init_db(), so databases created at earlier schema versions (e.g. v2)
+        # had their version stamp bumped to SCHEMA_VERSION without actually
+        # receiving the ALTER TABLE additions. This caused silent column
+        # absence (valid_from, memory_type, user_id, etc.) and the 93% orphan
+        # rate in Eir consolidation reports.
+        from mimir_well.migrations.runner import run_migrations
+
+        current_version = cursor.execute(
             "SELECT value FROM _schema_meta WHERE key = 'schema_version'"
         ).fetchone()
-        if existing_version is None or int(existing_version[0]) != SCHEMA_VERSION:
+        if current_version is None:
+            # Fresh database — stamp the current version
             cursor.execute(
                 "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES (?, ?)",
                 ("schema_version", str(SCHEMA_VERSION)),
             )
+        elif int(current_version[0]) < SCHEMA_VERSION:
+            # Existing database behind current schema — run all pending migrations
+            logger.info(
+                "Database schema v%d behind current v%d — running migrations",
+                int(current_version[0]),
+                SCHEMA_VERSION,
+            )
+            applied = run_migrations(conn, target_version=SCHEMA_VERSION)
+            if applied:
+                logger.info("Applied migrations: %s", applied)
 
         conn.commit()
 

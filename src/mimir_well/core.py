@@ -950,11 +950,8 @@ class RunaMemory:
         Returns:
             Dict with 'decayed', 'pruned', 'reinforced' counts
         """
-        self._lock.acquire()
-        try:
+        with self._lock:
             return self._decay_inner(half_life_days, min_importance, user_id)
-        finally:
-            self._lock.release()
 
     def _decay_inner(self, half_life_days: float, min_importance: int,
                      user_id: Optional[str]) -> Dict[str, int]:
@@ -1073,11 +1070,8 @@ class RunaMemory:
         Returns:
             Dict with counts: {"decayed": N, "promoted": N, "pruned": N}
         """
-        self._lock.acquire()
-        try:
+        with self._lock:
             return self._consolidate_inner(user_id)
-        finally:
-            self._lock.release()
 
     def _consolidate_inner(self, user_id: Optional[str] = None) -> Dict[str, int]:
         """Inner consolidate implementation — called with lock held."""

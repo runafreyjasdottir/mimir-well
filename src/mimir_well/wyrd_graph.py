@@ -585,47 +585,59 @@ class WyrdGraph:
 
     def edge_count(self, user_id: Optional[str] = None) -> int:
         """Return total number of edges in the graph, optionally filtered by user."""
-        if user_id:
-            row = self._get_conn().execute(
-                "SELECT COUNT(*) FROM wyrd_edges WHERE user_id = ?", (user_id,)
-            ).fetchone()
-        else:
-            row = self._get_conn().execute("SELECT COUNT(*) FROM wyrd_edges").fetchone()
-        return row[0] if row else 0
+        try:
+            if user_id:
+                row = self._get_conn().execute(
+                    "SELECT COUNT(*) FROM wyrd_edges WHERE user_id = ?", (user_id,)
+                ).fetchone()
+            else:
+                row = self._get_conn().execute("SELECT COUNT(*) FROM wyrd_edges").fetchone()
+            return row[0] if row else 0
+        except sqlite3.OperationalError as e:
+            logger.warning("edge_count failed: %s", e)
+            return 0
 
     def entity_count(self, user_id: Optional[str] = None) -> int:
         """Return number of distinct entities in the graph, optionally filtered by user."""
-        if user_id:
-            row = self._get_conn().execute(
-                "SELECT COUNT(DISTINCT e) FROM ("
-                "  SELECT source_entity AS e FROM wyrd_edges WHERE user_id = ?"
-                "  UNION"
-                "  SELECT target_entity AS e FROM wyrd_edges WHERE user_id = ?"
-                ")",
-                (user_id, user_id),
-            ).fetchone()
-        else:
-            row = self._get_conn().execute(
-                "SELECT COUNT(DISTINCT e) FROM ("
-                "  SELECT source_entity AS e FROM wyrd_edges "
-                "  UNION "
-                "  SELECT target_entity AS e FROM wyrd_edges"
-                ")"
-            ).fetchone()
-        return row[0] if row else 0
+        try:
+            if user_id:
+                row = self._get_conn().execute(
+                    "SELECT COUNT(DISTINCT e) FROM ("
+                    "  SELECT source_entity AS e FROM wyrd_edges WHERE user_id = ?"
+                    "  UNION"
+                    "  SELECT target_entity AS e FROM wyrd_edges WHERE user_id = ?"
+                    ")",
+                    (user_id, user_id),
+                ).fetchone()
+            else:
+                row = self._get_conn().execute(
+                    "SELECT COUNT(DISTINCT e) FROM ("
+                    "  SELECT source_entity AS e FROM wyrd_edges "
+                    "  UNION "
+                    "  SELECT target_entity AS e FROM wyrd_edges"
+                    ")"
+                ).fetchone()
+            return row[0] if row else 0
+        except sqlite3.OperationalError as e:
+            logger.warning("entity_count failed: %s", e)
+            return 0
 
     def relationship_types(self, user_id: Optional[str] = None) -> List[str]:
         """Return all distinct relationship types in the graph, optionally filtered by user."""
-        if user_id:
-            rows = self._get_conn().execute(
-                "SELECT DISTINCT relationship_type FROM wyrd_edges WHERE user_id = ? ORDER BY relationship_type",
-                (user_id,),
-            ).fetchall()
-        else:
-            rows = self._get_conn().execute(
-                "SELECT DISTINCT relationship_type FROM wyrd_edges ORDER BY relationship_type"
-            ).fetchall()
-        return [r[0] for r in rows]
+        try:
+            if user_id:
+                rows = self._get_conn().execute(
+                    "SELECT DISTINCT relationship_type FROM wyrd_edges WHERE user_id = ? ORDER BY relationship_type",
+                    (user_id,),
+                ).fetchall()
+            else:
+                rows = self._get_conn().execute(
+                    "SELECT DISTINCT relationship_type FROM wyrd_edges ORDER BY relationship_type"
+                ).fetchall()
+            return [r[0] for r in rows]
+        except sqlite3.OperationalError as e:
+            logger.warning("relationship_types failed: %s", e)
+            return []
 
     # ── Migration ─────────────────────────────────────────────────────────────
 

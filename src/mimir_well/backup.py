@@ -133,10 +133,14 @@ def restore_from_backup(db_path: Path, backup_path: str,
         except OSError as e:
             logger.warning("Could not create safety backup: %s", e)
 
-    # Close connection if provided
+    # Close connection if provided — caller must ensure a fresh
+    # connection is opened afterward (e.g. via _get_conn() which
+    # lazily reconnects, or by explicitly creating a new RunaMemory).
+    dead = False
     if conn_ref:
         try:
             conn_ref.close()
+            dead = True
         except Exception:
             pass
 

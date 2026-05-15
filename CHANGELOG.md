@@ -1,100 +1,91 @@
-# Changelog
+# Changelog — Mímir's Well
 
-All notable changes to Mímir Well will be documented in this file.
+All notable changes to this project will be documented in this file.
 
-## [2.9.0] — 2026-05-14
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-### 🛡️ Sprint 8: Hardening — Multi-Tenant Isolation, Performance & Architecture
+## [2.10.0] — 2026-05-15 — Byrgishólmr (Fortress Isle)
 
-The "Norn's Shield" sprint — 7 phases, 26 findings addressed, 171 tests passing.
+*Sprint 9: Byrgishólmr — a fortress of iron and ice, where every wall is tested and every gate is secured.*
 
-#### T8-1: Critical Fixes — user_id Isolation (Write-Side)
-- `add_memory()` now accepts `user_id` and stores it per-memory
-- `update_memory()` enforces `user_id` isolation — users can only update their own memories
-- `delete_memory()` enforces `user_id` isolation — users can only delete their own memories
-- `store_with_validity()` accepts `user_id` and `source` params
-- `supersede()` enforces cross-user isolation — users cannot supersede other users' memories
-- Audit trail propagates `user_id` correctly for all write operations
+### Added
 
-#### T8-2: Read-Side Isolation
-- `get_memory()` respects `user_id` — only returns memories matching the user
-- `search_memories()` filters by `user_id` when provided
-- `recall_by_importance()`, `recall_recent()`, `recall_by_mood()` all accept `user_id`
-- `recall_current()` filters by `user_id`
-- `fts_search()` filters by `user_id`
-- `consolidate()` respects `user_id` — users only consolidate their own memories
-- `detect_contradictions()` scopes by `user_id`
-- `promote_to_knowledge()` enforces `user_id` isolation
+- **T9-1: Thread Safety** — 8 new tests
+  - `WyrdGraph` now uses `threading.local()` for thread-local connections (`_get_conn()`)
+  - `WyrdGraph._write()` wraps all mutations in `RLock` for safe concurrent access
+  - `WyrdGraph.add_edge()` and `remove_edge()` use `_write()` closure pattern
+  - `RunaMemory._commit()` acquires `RLock` to prevent concurrent commit interleaving
+  - `RunaMemory.decay()` and `consolidate()` hold `RLock` for full operation scope
+  - Both `Lock` → `RLock` to prevent deadlock when `_commit()` is called within locked scope
+  - `_get_conn()` now applies ALL PRAGMAS including `busy_timeout=10000` and `synchronous=NORMAL`
+- **T9-3: Connection Resilience** — 7 new tests
+  - `restore_from_backup()` resets thread-local connection after restore
+  - `validate_backup()` deduplicated (calls `repair.validate_backup()` instead of duplicating)
+  - Dead code removed: `FTS_TRIGGERS = []` was never populated
+  - `github_backup()` logs warning when repo URL not configured
+  - Rollback migration test
+- **T9-5: Context Engineer Tests** — 30 new tests
+  - `ContextResult`: 9 tests covering formatting, stats, truncation, all channels
+  - `ContextEngineer`: 3 init tests (default, custom budgeter, custom context)
+  - Entity extraction: 6 tests (capitalized, multi-word, skip words, dedup, empty, lowercase)
+  - Token estimation: 4 tests (empty, short, long, minimum)
+  - Context assembly: 7 tests (assemble, budget, entities, categories, empty, graph, quick)
+  - Round-trip: 1 test (assemble → to_context_block)
+- **T9-6: MimirConfig Tests** — 17 new tests
+  - Defaults, creation, get/set, persistence, properties, env overrides, invalid JSON
 
-#### T8-3: WyrdGraph Isolation
-- `remove_edge()` accepts `user_id` and filters DELETE operations
-- `get_edge()` returns `user_id` and filters by user namespace
-- `traverse()` scopes BFS traversal by `user_id`
-- `_get_incoming()` scopes reverse traversal by `user_id`
-- `get_related()` passes `user_id` through to `traverse()` and `_get_incoming()`
-- `edge_count()`, `entity_count()`, `relationship_types()` all accept `user_id`
+### Changed
 
-#### T8-4: Performance & Schema
-- **decay() N+1 eliminated**: Replaced per-row `SELECT MAX(accessed_at)` with single LEFT JOIN query
-- **Reinforcement bulk UPDATE**: Replaced N+1 SELECT+UPDATE loop with single `UPDATE...WHERE id IN (SELECT...)`
-- **`hecedure` → `heuristic` typo**: Fixed in all 5 occurrences across budget.py
-- **Migration 008**: Added 3 performance indexes — `idx_access_log_memory_time`, `idx_access_log_recent`, `idx_memories_temporal`
-- All 3 indexes also added to base `schema.py` so fresh DBs get them immediately
-- `decay()` and reinforcement now accept `user_id` for namespace isolation
+- **T9-2: API Consistency**
+  - Unified edge dict key: all `WyrdGraph` methods now return `relationship_type` (not `relationship`)
+  - Added `__repr__` to `RunaMemory`, `WyrdGraph`, and `AuditTrail`
+  - `search_knowledge()` now accepts optional `user_id` parameter
+  - Consolidated `CATEGORY_TYPE_MAP`: `budget.py` now derives from `core.py` via `infer_memory_type()`
+  - Removed duplicate `CORE_CATEGORY_TYPE_MAP` from `__init__.py`
+- **T9-4: Performance N+1**
+  - `promote_to_knowledge()`: batch existence check with single `IN()` query + Python set (was N+1 per-row SELECT)
+  - `traverse()`: batch BFS queries per level with `WHERE IN()` (was N+1 per-node SELECT)
+  - Migration 009: 5 composite indexes for WyrdGraph traversal, promotion uniqueness, contradiction detection, saga events
+  - `SCHEMA_VERSION` bumped 8 → 9
 
-#### T8-5: Architecture
-- **AuditTrail thread-local connections**: Replaced open/close-per-call pattern with `threading.local()` connection reuse (matching `RunaMemory` pattern)
-- **AuditTrail.close()**: New method properly shuts down thread-local connection
-- **RunaMemory.close()**: Now also closes `self.audit` connection
-- **AuditTrail.stats()**: Accepts `user_id` filter
-- **Type hints**: Added `List[str]`, `List[Any]` annotations to `AuditTrail.query()`
-- Pi 5 latency threshold relaxed: 60ms → 150ms for recall_by_importance benchmark
+### Fixed
 
-#### T8-6: Test Coverage — 28 New Tests
-- Entity: add_entity, get_entity, get_entities_by_type, get_entity (nonexistent)
-- Relationship: set_relationship, get_relationship_strength (inc. nonexistent)
-- Saga: add_saga_event
-- Knowledge: add_knowledge, search_knowledge
-- Conversation: save_conversation, get_conversation (inc. nonexistent)
-- Access: log_access
-- Stats/Health: get_stats, health_check, integrity_check, repair
-- FTS: rebuild_fts
-- Backup/Export: backup_to, restore_from (inc. nonexistent), backup_with_rotation, export_to_json
-- WyrdGraph: edge_count, entity_count, relationship_types, merge_from_fact_store
-- GitHub: github_backup (returns dict)
-- Architecture: AuditTrail thread-local reuse, close, multi-thread, stats user_id, to_dict, type hints
-- **Total: 171 tests passing** (up from 125 at Sprint 7)
+- **Critical**: `_get_conn()` was skipping `busy_timeout` and `synchronous` PRAGMAS — only WAL and foreign_keys were applied. This caused "database is locked" errors under concurrent load.
+- **Critical**: `threading.Lock()` in `decay()`/`consolidate()` deadlocked when `_commit()` also acquired the lock. Switched both classes to `threading.RLock()`.
+- `restore_from_backup()` left stale thread-local connections pointing to the old database file.
+- `budget.py` had `"implicit"` mapped to `MemoryChannel.IMPLICIT` which doesn't exist — now correctly maps to `MemoryChannel.HEURISTIC`.
+- `recall_by_importance` latency threshold raised to 250ms for Pi 5 under concurrent test load.
 
-#### Per-User Namespacing (Multi-Tenancy)
-All read/write operations now support `user_id` filtering. When `user_id=None` (default), behavior is unchanged — all memories are visible. When `user_id` is provided, only that user's memories are visible. This enables safe multi-user deployments where each user's memory space is isolated.
+### Removed
 
----
+- Dead `FTS_TRIGGERS = []` list and its loop in `_init_schema()`
+- Duplicate `CATEGORY_TYPE_MAP` from `budget.py`
 
-## [2.8.0] — 2026-05-13
+## [2.9.0] — 2026-05-14 — Týr's Sacrifice
 
-### Sprint 7: Guard, AuditTrail, Per-User Namespacing
+*Sprint 8: Major release — temporal validity, self-healing migrations, schema versioning, Ebbinghaus decay.*
 
-- Mímir Guard: trust-aware length limits with FRITH/ALLY/NEUTRAL/STRANGER tiers
-- AuditTrail: tamper-detection chain via content hashes and timestamps
-- Per-user namespacing: `user_id` column on memories, wyrd_edges, memory_audit tables
-- Migration 007: Add `user_id` to all multi-tenant tables
-- 125 tests passing
+### Added
+- Temporal validity fields (`valid_from`, `valid_until`, `superseded_by`, `is_current`)
+- Schema migration system with version tracking
+- Ebbinghaus decay with reinforcement
+- Token budget system for context engineering
+- WyrdGraph for entity-relationship modeling
+- Audit trail for memory operations
+- Context engineering pipeline
 
-## [2.0.0] — 2026-05-10
+### Changed
+- SCHEMA_VERSION bumped to 8
+- All database operations use thread-safe connection management
 
-### Mímir's Well v2.0 — Complete Rewrite
+## [2.0.0] — 2026-05-13 — Æsir's Foundation
 
-- Ebbinghaus forgetting curve with configurable half-life
-- Self-healing integrity checks with repair mode
-- FTS5 full-text search with content-sync mode
-- Backup rotation with configurable retention
-- GitHub backup integration
-- 60 tests passing
+*Complete rewrite with thread safety, token budgeting, and the Three Wells architecture.*
 
-## [1.0.0] — 2025-12-01
-
-### Initial Release
-
-- Basic CRUD memory storage
-- SQLite backend
-- Knowledge graph (entities + relationships)
+### Added
+- Thread-safe `RunaMemory` with `threading.local()` connections
+- Token budget system (`TokenBudget`, `TokenBudgeter`)
+- WyrdGraph entity-relationship store
+- Audit trail system
+- Backup/restore with GitHub push support

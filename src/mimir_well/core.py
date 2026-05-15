@@ -552,16 +552,32 @@ class RunaMemory:
         return self._write(_insert)
 
     def search_knowledge(self, domain: str, query: str,
-                          limit: int = 20) -> List[Dict]:
-        """Search knowledge within a domain."""
-        cursor = self._get_conn().cursor()
-        cursor.execute("""
-            SELECT * FROM knowledge
-            WHERE domain = ? AND content LIKE ?
-            ORDER BY confidence DESC, created_at DESC
-            LIMIT ?
-        """, (domain, f"%{query}%", limit))
-        return [dict(row) for row in cursor.fetchall()]
+                          limit: int = 20,
+                          user_id: Optional[str] = None) -> List[Dict]:
+        """Search knowledge within a domain.
+
+        Args:
+            domain: Knowledge domain to search in.
+            query: Search string (LIKE pattern).
+            limit: Maximum results to return.
+            user_id: Filter by user namespace (None = all users).
+        """
+        conn = self._get_conn()
+        if user_id:
+            rows = conn.execute("""
+                SELECT * FROM knowledge
+                WHERE domain = ? AND content LIKE ? AND user_id = ?
+                ORDER BY confidence DESC, created_at DESC
+                LIMIT ?
+            """, (domain, f"%{query}%", user_id, limit)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM knowledge
+                WHERE domain = ? AND content LIKE ?
+                ORDER BY confidence DESC, created_at DESC
+                LIMIT ?
+            """, (domain, f"%{query}%", limit)).fetchall()
+        return [dict(row) for row in rows]
 
     # ─── FTS5 Search ──────────────────────────────────────────────────────
 
@@ -1491,6 +1507,15 @@ class RunaMemory:
             except Exception:
                 pass
             self._local.conn = None
+
+    def __repr__(self) -> str:
+        """String representation showing DB path and memory count."""
+        try:
+            conn = self._get_conn()
+            count = conn.execute("SELECT COUNT(*) FROM memories WHERE is_current = 1").fetchone()[0]
+        except Exception:
+            count = '?'
+        return f"RunaMemory(db_path='{self.db_path}', memories={count})"
 
     def __enter__(self):
         return self

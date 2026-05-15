@@ -110,6 +110,15 @@ class AuditTrail:
             self._local.conn = None
             logger.debug("AuditTrail: closed thread-local connection")
 
+    def __repr__(self) -> str:
+        """String representation showing entry count."""
+        try:
+            conn = self._get_conn()
+            count = conn.execute("SELECT COUNT(*) FROM memory_audit").fetchone()[0]
+        except Exception:
+            count = '?'
+        return f"AuditTrail(entries={count})"
+
     def log(
         self,
         memory_id: int,

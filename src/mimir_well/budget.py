@@ -70,28 +70,25 @@ class MemoryChannel(Enum):
     HEURISTIC = "heuristic"
 
 
-# Category → default memory type mapping (for T5-3 integration)
-CATEGORY_TYPE_MAP = {
-    "nse_character": MemoryChannel.EPISODIC,
-    "nse_location": MemoryChannel.EPISODIC,
-    "nse_relationship": MemoryChannel.EPISODIC,
-    "saga_moment": MemoryChannel.EPISODIC,
-    "preference": MemoryChannel.SEMANTIC,
-    "lesson": MemoryChannel.PROCEDURAL,
-    "knowledge": MemoryChannel.SEMANTIC,
-    "relationship": MemoryChannel.SEMANTIC,
-    "science_discovery": MemoryChannel.SEMANTIC,
-    "spiritual": MemoryChannel.SEMANTIC,
-    "sexual": MemoryChannel.EPISODIC,
-    "dream": MemoryChannel.EPISODIC,
-    "brilliant": MemoryChannel.EPISODIC,
-    "general": MemoryChannel.EPISODIC,
+# Category → memory channel mapping (derived from core.CATEGORY_TYPE_MAP)
+# Single source of truth: core.py defines category→string, we map string→enum
+_STRING_TO_CHANNEL = {
+    "episodic": MemoryChannel.EPISODIC,
+    "semantic": MemoryChannel.SEMANTIC,
+    "procedural": MemoryChannel.PROCEDURAL,
+    "implicit": MemoryChannel.HEURISTIC,
 }
 
 
 def infer_channel(category: str) -> MemoryChannel:
-    """Map a Mímir category to a memory channel for budgeting."""
-    return CATEGORY_TYPE_MAP.get(category, MemoryChannel.EPISODIC)
+    """Map a Mímir category to a memory channel for budgeting.
+
+    Uses core.CATEGORY_TYPE_MAP as the single source of truth for
+    category→type mappings, then converts the string type to an enum.
+    """
+    from mimir_well.core import infer_memory_type
+    mem_type = infer_memory_type(category)
+    return _STRING_TO_CHANNEL.get(mem_type, MemoryChannel.EPISODIC)
 
 
 # ── Token Budget Dataclass ────────────────────────────────────────────

@@ -121,6 +121,16 @@ class WyrdGraph:
                 pass
             self._local.conn = None
 
+    def __repr__(self) -> str:
+        """String representation showing node and edge counts."""
+        try:
+            conn = self._get_conn()
+            nodes = conn.execute("SELECT COUNT(DISTINCT source_entity) + COUNT(DISTINCT target_entity) FROM wyrd_edges").fetchone()[0]
+            edges = conn.execute("SELECT COUNT(*) FROM wyrd_edges").fetchone()[0]
+        except Exception:
+            nodes, edges = '?', '?'
+        return f"WyrdGraph(nodes={nodes}, edges={edges})"
+
     def __enter__(self):
         return self
 
@@ -317,7 +327,7 @@ class WyrdGraph:
                 "id": r["id"],
                 "source": r["source_entity"],
                 "target": r["target_entity"],
-                "relationship": r["relationship_type"],
+                "relationship_type": r["relationship_type"],
                 "strength": r["strength"],
                 "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
                 "created_at": r["created_at"],
@@ -388,7 +398,7 @@ class WyrdGraph:
                 "id": r["id"],
                 "source": r["source_entity"],
                 "target": r["target_entity"],
-                "relationship": r["relationship_type"],
+                "relationship_type": r["relationship_type"],
                 "strength": r["strength"],
                 "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
                 "created_at": r["created_at"],
@@ -460,7 +470,7 @@ class WyrdGraph:
                         "entity": target,
                         "distance": depth + 1,
                         "path": new_path,
-                        "relationship": rel_type,
+"relationship_type": rel_type,
                         "strength": strength,
                     })
                     queue.append((target, depth + 1, new_path))
@@ -519,7 +529,7 @@ class WyrdGraph:
                         "entity": source,
                         "distance": depth + 1,
                         "path": new_path,
-                        "relationship": rel_type,
+"relationship_type": rel_type,
                         "strength": strength,
                     })
                     queue.append((source, depth + 1, new_path))

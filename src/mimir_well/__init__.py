@@ -33,9 +33,8 @@ from mimir_well.budget import (
     BudgetPriority,
     MemoryChannel,
     infer_channel,
-    CATEGORY_TYPE_MAP,
 )
-from mimir_well.core import infer_memory_type, CATEGORY_TYPE_MAP as CORE_CATEGORY_TYPE_MAP, VALID_MEMORY_TYPES
+from mimir_well.core import infer_memory_type, VALID_MEMORY_TYPES
 from mimir_well.wyrd_graph import WyrdGraph
 from mimir_well.context_engineer import ContextEngineer, ContextResult
 from mimir_well.audit import AuditTrail, AuditAction, AuditEntry
@@ -67,7 +66,6 @@ __all__ = [
     "BudgetPriority",
     "MemoryChannel",
     "infer_channel",
-    "CATEGORY_TYPE_MAP",
     # T5-2: Temporal Validity & Migrations
     "MIGRATIONS",
     "run_migrations",

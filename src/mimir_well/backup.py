@@ -17,6 +17,8 @@ from glob import glob
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from mimir_well.schema import ALL_TABLES
+
 logger = logging.getLogger("mimir_well.backup")
 
 
@@ -186,6 +188,10 @@ def export_to_json(conn: sqlite3.Connection, export_path: str,
 
     for table in ["memories", "saga_events", "entities", "relationships",
                    "conversations", "knowledge"]:
+        # Validate table name against allowed list (defense in depth)
+        if table not in ALL_TABLES:
+            logger.warning("Skipping invalid table name during export: %s", table)
+            continue
         try:
             cursor.execute(f"SELECT * FROM {table}")
             for row in cursor.fetchall():
